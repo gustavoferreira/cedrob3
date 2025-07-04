@@ -713,20 +713,30 @@ void connect_and_listen() {
     // Initialize Renko processing
     initialize_renko_processing(configs, MAX_SYMBOLS, date.c_str());
     
-    // Initialize Renko states - ADD THIS LINE
+    // Initialize Renko states
     initialize_renko_states(configs, MAX_SYMBOLS);
     
-    while (is_time_to_stop()) {
-        std::cerr << " Fora do Horario- Tentando novamente em 10 segundos..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+    if (is_time_to_stop()) {
+        std::cerr << "Fora do Horario - Aguardando próximo dia de operação..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(60));
+        return;
     }
+
+    // Create files for data logging outside the connection loop
+    std::string raw_filename = "/home/grao/dados/cedro_files/" + date + "_raw_data.txt";
+    fs::create_directories("/home/grao/dados/cedro_files");
+    std::ofstream raw_file(raw_filename, std::ios::app);
+
+    std::string booking_filename = "/home/grao/dados/renko_files/" + date + "_booking_data.txt";
+    fs::create_directories("/home/grao/dados/renko_files");
+    std::ofstream booking_file(booking_filename, std::ios::app);
 
     while (!is_time_to_stop()) {
         try {
             io_context_type io_context;
             tcp::resolver resolver(io_context);
             //tcp::resolver::results_type endpoints = resolver.resolve("datafeed1.cedrotech.com", "81");
-	    //auto endpoints = resolver.resolve("datafeed1.cedrotech.com", "81");
+	        //auto endpoints = resolver.resolve("datafeed1.cedrotech.com", "81");
             tcp::resolver::query query("datafeed1.cedrotech.com", "81");
             auto endpoints = resolver.resolve(query);	    //
             tcp::socket socket(io_context);
@@ -785,17 +795,21 @@ void connect_and_listen() {
                 boost::asio::write(socket, boost::asio::buffer(commands[i]));
             }
 
-            // Create a file for raw data
-            std::string raw_filename = "/home/grao/dados/cedro_files/" + date + "_raw_data.txt";
-            fs::create_directories("/home/grao/dados/cedro_files");
-            std::ofstream raw_file(raw_filename, std::ios::app);
-
-            // Create a file for booking data
-            std::string booking_filename = "/home/grao/dados/renko_files/" + date + "_booking_data.txt";
-            fs::create_directories("/home/grao/dados/renko_files");
-            std::ofstream booking_file(booking_filename, std::ios::app);
-
             while (!is_time_to_stop()) {
+                // Verificar e reabrir arquivos se necessário
+                if (!raw_file.is_open()) {
+                    raw_file.open(raw_filename, std::ios::app);
+                    if (!raw_file.is_open()) {
+                        std::cerr << "Erro ao reabrir arquivo raw_file: " << raw_filename << std::endl;
+                    }
+                }
+                if (!booking_file.is_open()) {
+                    booking_file.open(booking_filename, std::ios::app);
+                    if (!booking_file.is_open()) {
+                        std::cerr << "Erro ao reabrir arquivo booking_file: " << booking_filename << std::endl;
+                    }
+                }
+
                 boost::asio::streambuf reply_buf;
                 boost::system::error_code error;
 
@@ -814,7 +828,7 @@ void connect_and_listen() {
                 reply_buf.consume(reply_length);
 
                 // Write raw data directly to file
-                if (raw_file.is_open() && !response_data.empty()) {
+                if (!response_data.empty()) {
                     raw_file << response_data;
                     raw_file.flush(); // Ensure data is written immediately
                     std::cout << "Received " << reply_length << " bytes of data" << std::endl;
@@ -829,10 +843,8 @@ void connect_and_listen() {
                         
                         // Process booking data
                         if (line.rfind("B:", 0) == 0) {
-                            if (booking_file.is_open()) {
-                                booking_file << line << std::endl;
-                                booking_file.flush();
-                            }
+                            booking_file << line << std::endl;
+                            booking_file.flush();
                             continue;
                         }
                         
@@ -844,25 +856,33 @@ void connect_and_listen() {
                 }
             }
 
-            // Close the files when done
-            if (raw_file.is_open()) {
-                raw_file.close();
-            }
-            if (booking_file.is_open()) {
-                booking_file.close();
-            }
-            
             // Close Renko files
             close_renko_files(configs, MAX_SYMBOLS);
 
         }
-        catch (std::exception& e) {
-            std::cerr << "Erro: " << e.what() << " - Tentando reconectar em 5 segundos..." << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+        catch (const std::exception& e) {
+            std::cerr << "Erro de conexão: " << e.what() << std::endl;
             
             // Close Renko files before reconnecting
             close_renko_files(configs, MAX_SYMBOLS);
+            
+            // Se estiver fora do horário, sai do loop atual
+            if (is_time_to_stop()) {
+                std::cerr << "Fora do horário de operação. Aguardando próximo dia..." << std::endl;
+                return;
+            }
+            
+            std::cerr << "Tentando reconectar em 5 segundos..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
         }
+    
+    // Close the files when exiting
+    if (raw_file.is_open()) {
+        raw_file.close();
+    }
+    if (booking_file.is_open()) {
+        booking_file.close();
     }
     
     // Make sure to close all Renko files when exiting
@@ -870,6 +890,14 @@ void connect_and_listen() {
 }
 
 int main() {
-    connect_and_listen();
+    while (true) {
+        try {
+            connect_and_listen();
+            std::cout << "Sessão encerrada. Reiniciando em 5 segundos..." << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Erro na sessão principal: " << e.what() << std::endl;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
     return 0;
 }
