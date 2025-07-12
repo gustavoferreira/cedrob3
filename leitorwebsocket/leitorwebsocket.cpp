@@ -732,7 +732,7 @@ void connect_and_listen() {
     std::ofstream booking_file(booking_filename, std::ios::app);
 
     while (!is_time_to_stop()) {
-        //try {
+        try {
             io_context_type io_context;
             tcp::resolver resolver(io_context);
             //tcp::resolver::results_type endpoints = resolver.resolve("datafeed1.cedrotech.com", "81");
@@ -796,6 +796,44 @@ void connect_and_listen() {
             }
 
             while (!is_time_to_stop()) {
+                // Verificar se a data mudou e recriar arquivos se necessário
+                std::string current_date = get_current_date();
+                if (current_date != date) {
+                    std::cout << "Data mudou de " << date << " para " << current_date << ". Criando novos arquivos..." << std::endl;
+                    
+                    // Fechar arquivos antigos
+                    if (raw_file.is_open()) {
+                        raw_file.close();
+                    }
+                    if (booking_file.is_open()) {
+                        booking_file.close();
+                    }
+                    
+                    // Fechar arquivos Renko antigos
+                    close_renko_files(configs, MAX_SYMBOLS);
+                    
+                    // Atualizar data
+                    date = current_date;
+                    
+                    // Reinicializar processamento Renko com nova data
+                    initialize_renko_processing(configs, MAX_SYMBOLS, date.c_str());
+                    initialize_renko_states(configs, MAX_SYMBOLS);
+                    
+                    // Criar novos arquivos com nova data
+                    raw_filename = "/home/grao/dados/cedro_files/" + date + "_raw_data.txt";
+                    booking_filename = "/home/grao/dados/renko_files/" + date + "_booking_data.txt";
+                    
+                    raw_file.open(raw_filename, std::ios::app);
+                    booking_file.open(booking_filename, std::ios::app);
+                    
+                    if (!raw_file.is_open()) {
+                        std::cerr << "Erro ao criar novo arquivo raw_file: " << raw_filename << std::endl;
+                    }
+                    if (!booking_file.is_open()) {
+                        std::cerr << "Erro ao criar novo arquivo booking_file: " << booking_filename << std::endl;
+                    }
+                }
+                
                 // Verificar e reabrir arquivos se necessário
                 if (!raw_file.is_open()) {
                     raw_file.open(raw_filename, std::ios::app);
@@ -859,24 +897,25 @@ void connect_and_listen() {
             // Close Renko files
             close_renko_files(configs, MAX_SYMBOLS);
 
-        //}
-        //catch (const std::exception& e) {
-        //    std::cerr << "Erro de conexão: " << e.what() << std::endl;
-        //    
-        //    // Close Renko files before reconnecting
-        //    close_renko_files(configs, MAX_SYMBOLS);
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Erro de conexão: " << e.what() << std::endl;
             
-        //    // Se estiver fora do horário, sai do loop atual
-        //    if (is_time_to_stop()) {
-        //        std::cerr << "Fora do horário de operação. Aguardando próximo dia..." << std::endl;
-        //        return;
-        //    }
-        //    
-        //    std::cerr << "Tentando reconectar em 5 segundos..." << std::endl;
-        //    std::this_thread::sleep_for(std::chrono::seconds(5));
-        //    continue;
-        //}
-    } 
+            // Close Renko files before reconnecting
+            close_renko_files(configs, MAX_SYMBOLS);
+            
+            // Se estiver fora do horário, sai do loop atual
+            if (is_time_to_stop()) {
+                std::cerr << "Fora do horário de operação. Aguardando próximo dia..." << std::endl;
+                return;
+            }
+            
+            std::cerr << "Tentando reconectar em 5 segundos..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+    }
+    
     // Close the files when exiting
     if (raw_file.is_open()) {
         raw_file.close();
