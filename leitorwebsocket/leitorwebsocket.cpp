@@ -9,6 +9,7 @@
 #include <thread>
 #include <boost/algorithm/string.hpp>
 #include <cmath>
+#include <iomanip>
 
 //#using boost::asio::ip::tcp;
 namespace fs = std::filesystem;
@@ -95,11 +96,37 @@ void log_response(const std::string& response, const std::string& symbol) {
     std::string type = (response.rfind("V:", 0) == 0) ? "quote" : "booking";
     std::string filename = "/home/grao/dados/cedro_files/" + date + "_" + symbol + "_" + type + ".txt";
 
-    fs::create_directories("/home/grao/dados/cedro_files/");
-    std::ofstream log_file(filename, std::ios::app);
-    if (log_file.is_open()) {
+    try {
+        // Create directories with error checking
+        std::error_code ec;
+        fs::create_directories("/home/grao/dados/cedro_files/", ec);
+        if (ec) {
+            std::cerr << "Erro ao criar diretório: " << ec.message() << std::endl;
+            return;
+        }
+        
+        std::ofstream log_file(filename, std::ios::app);
+        if (!log_file.is_open()) {
+            std::cerr << "Erro ao abrir arquivo: " << filename << std::endl;
+            return;
+        }
+        
         log_file << response << std::endl;
+        
+        // Check if write was successful
+        if (log_file.fail()) {
+            std::cerr << "Erro ao escrever no arquivo: " << filename << std::endl;
+            return;
+        }
+        
         log_file.close();
+        
+        // Verify file was closed properly
+        if (log_file.fail()) {
+            std::cerr << "Erro ao fechar arquivo: " << filename << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Exceção na função log_response: " << e.what() << std::endl;
     }
 }
 
@@ -294,20 +321,19 @@ void initialize_renko_processing(const RenkoConfig* configs, int num_configs, co
             // Create directory if it doesn't exist
             fs::create_directories("/home/grao/dados/renko_files/");
             
-            // Open the file just to create it and write the header
-
-            FILE* temp_file = fopen(renko_file, "w");
-            if (!temp_file) {
-               perror("Erro ao abrir o arquivo");
-               // lidar com o erro aqui
-	       continue;
+            // Open the file and keep it open
+            renko_files[s][i] = fopen(renko_file, "a");
+            if (!renko_files[s][i]) {
+               perror("Erro ao abrir o arquivo Renko");
+               continue;
             }
-
-
             
-            // Write header and close immediately
-            fprintf(temp_file, "data,time,open,high,low,close\n");
-            fclose(temp_file);
+            // Write header only if file is new (check file size)
+            fseek(renko_files[s][i], 0, SEEK_END);
+            if (ftell(renko_files[s][i]) == 0) {
+                fprintf(renko_files[s][i], "data,time,open,high,low,close\n");
+                fflush(renko_files[s][i]);
+            }
             
             // Initialize variables
             current_prices[s][i] = 0.0;
@@ -328,26 +354,43 @@ void initialize_renko_processing(const RenkoConfig* configs, int num_configs, co
 void write_to_renko_file(int config_index, int size_index, const char* day, const RenkoConfig* configs, 
                          const char* time_str, time_t timestamp, int msec, 
                          double open, double high, double low, double close) {
-    char renko_file[256];
-    snprintf(renko_file, sizeof(renko_file), "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", 
-              day, configs[config_index].asset, configs[config_index].sizes[size_index]);
-    
-    // Open file in append mode
-    FILE* temp_file = fopen(renko_file, "w");
-    if (!temp_file) {
-       perror("Erro ao abrir o arquivo");
-       // lidar com o erro aqui
-       return;
+    // Use the already opened file from renko_files array
+    if (!renko_files[config_index][size_index]) {
+        perror("Arquivo Renko não está aberto");
+        return;
     }
-
-
     
-    // Write data
-    fprintf(temp_file, "%s,%lld.%03d,%.2f,%.2f,%.2f,%.2f\n",
+    // Write data to the already opened file
+    int result = fprintf(renko_files[config_index][size_index], "%s,%lld.%03d,%.2f,%.2f,%.2f,%.2f\n",
             time_str, (long long)timestamp, msec, open, high, low, close);
     
-    // Close file immediately
-    fclose(temp_file);
+    // Check if write was successful
+    if (result < 0 || ferror(renko_files[config_index][size_index])) {
+        std::cerr << "ERRO: Falha ao escrever no arquivo Renko [" << config_index << "][" << size_index << "]" << std::endl;
+        
+        // Clear error and try to reopen the file
+        clearerr(renko_files[config_index][size_index]);
+        fclose(renko_files[config_index][size_index]);
+        
+        // Reconstruct filename and reopen
+        char renko_file[256];
+        snprintf(renko_file, sizeof(renko_file), "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", 
+                day, configs[config_index].asset, configs[config_index].sizes[size_index]);
+        
+        renko_files[config_index][size_index] = fopen(renko_file, "a");
+        if (renko_files[config_index][size_index] == NULL) {
+            std::cerr << "ERRO CRÍTICO: Não foi possível reabrir arquivo Renko: " << renko_file << std::endl;
+        } else {
+            // Try to write again
+            fprintf(renko_files[config_index][size_index], "%s,%lld.%03d,%.2f,%.2f,%.2f,%.2f\n",
+                    time_str, (long long)timestamp, msec, open, high, low, close);
+        }
+    }
+    
+    // Flush to ensure data is written immediately
+    if (renko_files[config_index][size_index] != NULL) {
+        fflush(renko_files[config_index][size_index]);
+    }
 }
 
 // Modify process_trade_for_renko to use the new write function
@@ -470,22 +513,10 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
             char time_str[20];
             strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
             
-            // Write Renko brick with formatted date and time
-            char renko_file[256];
-            snprintf(renko_file, sizeof(renko_file), "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", 
-                      current_date.c_str(), configs[config_index].asset, configs[config_index].sizes[i]);
-
-
-
-            FILE* temp_file = fopen(renko_file, "w");
-            if (!temp_file) {
-               perror("Erro ao abrir o arquivo");
-               fprintf(temp_file, "%s,%lld.%03d,%.2f,%.2f,%.2f,%.2f\n",
-                        time_str, (long long)timestamp, msec,
-                        trade.price, trade.price, trade.price, trade.price);
-               fclose(temp_file);
-
-            }
+            // Write Renko brick using the helper function
+            write_to_renko_file(config_index, i, current_date.c_str(), configs,
+                               time_str, timestamp, msec,
+                               trade.price, trade.price, trade.price, trade.price);
 
 
             strftime(state->current_time_str, sizeof(state->current_time_str), "%Y%m%d %H:%M:%S", &tm_info);
@@ -527,22 +558,10 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
-                    // Write Renko brick with formatted date and time
-                    char renko_file[256];
-                    snprintf(renko_file, sizeof(renko_file), "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", 
-                              current_date.c_str(), configs[config_index].asset, configs[config_index].sizes[i]);
-                    
-
-                    FILE* temp_file = fopen(renko_file, "w");
-                    if (!temp_file) {
-                        perror("Erro ao abrir o arquivo");
-                        // lidar com o erro aqui
-                        fprintf(temp_file, "%s,%lld.%03d,%.2f,%.2f,%.2f,%.2f\n",
-                                time_str, (long long)timestamp, msec,
-                                brick_open, high_price, low_price, brick_close);
-                        fclose(temp_file);
-
-		    }
+                    // Write Renko brick using the helper function
+                    write_to_renko_file(config_index, i, current_date.c_str(), configs,
+                                       time_str, timestamp, msec,
+                                       brick_open, high_price, low_price, brick_close);
 
                     strftime(state->current_time_str, sizeof(state->current_time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     current_price = brick_close;
@@ -568,23 +587,10 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
-                    // Write Renko brick with formatted date and time
-                    char renko_file[256];
-                    snprintf(renko_file, sizeof(renko_file), "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", 
-                              current_date.c_str(), configs[config_index].asset, configs[config_index].sizes[i]);
-                    
-
-
-                   FILE* temp_file = fopen(renko_file, "w");
-                   if (!temp_file) {
-                       perror("Erro ao abrir o arquivo");
-                       // lidar com o erro aqui
-                       fprintf(temp_file, "%s,%lld.%03d,%.2f,%.2f,%.2f,%.2f\n",
-                                time_str, (long long)timestamp, msec,
-                                brick_open, high_price, low_price, brick_close);
-                       fclose(temp_file);
-
-		   }
+                    // Write Renko brick using the helper function
+                    write_to_renko_file(config_index, i, current_date.c_str(), configs,
+                                       time_str, timestamp, msec,
+                                       brick_open, high_price, low_price, brick_close);
 
                     
                     strftime(state->current_time_str, sizeof(state->current_time_str), "%Y%m%d %H:%M:%S", &tm_info);
@@ -617,15 +623,14 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                               current_date.c_str(), configs[config_index].asset, configs[config_index].sizes[i]);
                     
 
-                    FILE* temp_file = fopen(renko_file, "w");
-                    if (!temp_file) {
-                        perror("Erro ao abrir o arquivo");
-                        // lidar com o erro aquia
+                    FILE* temp_file = fopen(renko_file, "a");
+                    if (temp_file) {
                         fprintf(temp_file, "%s,%lld.%03d,%.2f,%.2f,%.2f,%.2f\n",
                                 time_str, (long long)timestamp, msec,
                                 brick_open, high_price, low_price, brick_close);
                         fclose(temp_file);
-			
+                    } else {
+                        perror("Erro ao abrir o arquivo");
                     }
 
                     
@@ -653,21 +658,10 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
-                    // Write Renko brick with formatted date and time
-                    char renko_file[256];
-                    snprintf(renko_file, sizeof(renko_file), "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", 
-                              current_date.c_str(), configs[config_index].asset, configs[config_index].sizes[i]);
-                    
-
-                    FILE* temp_file = fopen(renko_file, "w");
-                    if (!temp_file) {
-                        perror("Erro ao abrir o arquivo");
-                        // lidar com o erro aquia
-			fprintf(temp_file, "%s,%lld.%03d,%.2f,%.2f,%.2f,%.2f\n",
-                                time_str, (long long)timestamp, msec,
-                                brick_open, high_price, low_price, brick_close);
-                        fclose(temp_file);
-                    }
+                    // Write Renko brick using the helper function
+                    write_to_renko_file(config_index, i, current_date.c_str(), configs,
+                                       time_str, timestamp, msec,
+                                       brick_open, high_price, low_price, brick_close);
 
                     
                     strftime(state->current_time_str, sizeof(state->current_time_str), "%Y%m%d %H:%M:%S", &tm_info);
@@ -700,6 +694,13 @@ void close_renko_files(const RenkoConfig* configs, int num_configs) {
 // Modified connect_and_listen function to include Renko processing
 using boost::asio::ip::tcp;
 void connect_and_listen() {
+    // Initialize renko_files array to NULL
+    for (int s = 0; s < MAX_SYMBOLS; s++) {
+        for (int i = 0; i < MAX_RENKO_SIZES; i++) {
+            renko_files[s][i] = NULL;
+        }
+    }
+    
     // Configure Renko settings for multiple symbols
     RenkoConfig configs[MAX_SYMBOLS] = {
         {.asset = "DI", .factor = 0.1, .num_sizes = 2, .sizes = {3, 5} },
@@ -796,6 +797,28 @@ void connect_and_listen() {
             }
 
             while (!is_time_to_stop()) {
+            // Check file system health periodically
+            static int health_check_counter = 0;
+            if (health_check_counter++ % 1000 == 0) { // Check every 1000 iterations
+                auto now = std::chrono::system_clock::now();
+                auto time_t = std::chrono::system_clock::to_time_t(now);
+                std::cout << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] Sistema ativo - iteração " << health_check_counter << std::endl;
+                
+                // Check if files are still writable
+                if (raw_file.is_open() && raw_file.fail()) {
+                    std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] AVISO: raw_file em estado de erro, tentando recuperar..." << std::endl;
+                    raw_file.clear();
+                }
+                if (booking_file.is_open() && booking_file.fail()) {
+                    std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] AVISO: booking_file em estado de erro, tentando recuperar..." << std::endl;
+                    booking_file.clear();
+                }
+                
+                // Check if files are still open
+                std::cout << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] Status arquivos - raw: " << (raw_file.is_open() ? "ABERTO" : "FECHADO") 
+                         << ", booking: " << (booking_file.is_open() ? "ABERTO" : "FECHADO") << std::endl;
+            }
+                
                 // Verificar se a data mudou e recriar arquivos se necessário
                 std::string current_date = get_current_date();
                 if (current_date != date) {
@@ -811,6 +834,9 @@ void connect_and_listen() {
                     
                     // Fechar arquivos Renko antigos
                     close_renko_files(configs, MAX_SYMBOLS);
+                    
+                    // Limpar estados Renko antigos
+                    cleanup_renko_states(configs, MAX_SYMBOLS);
                     
                     // Atualizar data
                     date = current_date;
@@ -868,8 +894,27 @@ void connect_and_listen() {
                 // Write raw data directly to file
                 if (!response_data.empty()) {
                     raw_file << response_data;
-                    raw_file.flush(); // Ensure data is written immediately
-                    std::cout << "Received " << reply_length << " bytes of data" << std::endl;
+                    
+                    // Check if write was successful
+                    if (raw_file.fail()) {
+                        auto now = std::chrono::system_clock::now();
+                        auto time_t = std::chrono::system_clock::to_time_t(now);
+                        std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] ERRO: Falha ao escrever no arquivo raw_file: " << raw_filename << std::endl;
+                        std::cerr << "Estado do arquivo - eof: " << raw_file.eof() << ", bad: " << raw_file.bad() << ", fail: " << raw_file.fail() << std::endl;
+                        
+                        raw_file.clear(); // Clear error flags
+                        // Try to reopen the file
+                        raw_file.close();
+                        raw_file.open(raw_filename, std::ios::app);
+                        if (!raw_file.is_open()) {
+                            std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] ERRO CRÍTICO: Não foi possível reabrir raw_file" << std::endl;
+                        } else {
+                            std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] raw_file reaberto com sucesso" << std::endl;
+                        }
+                    } else {
+                        raw_file.flush(); // Ensure data is written immediately
+                        std::cout << "Received " << reply_length << " bytes of data" << std::endl;
+                    }
                     
                     // Process the data for Renko generation
                     // Split the response data into lines
@@ -882,7 +927,34 @@ void connect_and_listen() {
                         // Process booking data
                         if (line.rfind("B:", 0) == 0) {
                             booking_file << line << std::endl;
-                            booking_file.flush();
+                            
+                            // Check if booking write was successful
+                            if (booking_file.fail()) {
+                                auto now = std::chrono::system_clock::now();
+                                auto time_t = std::chrono::system_clock::to_time_t(now);
+                                std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] ERRO: Falha ao escrever no arquivo booking_file: " << booking_filename << std::endl;
+                                std::cerr << "Estado do arquivo - eof: " << booking_file.eof() << ", bad: " << booking_file.bad() << ", fail: " << booking_file.fail() << std::endl;
+                                
+                                booking_file.clear(); // Clear error flags
+                                // Try to reopen the file
+                                booking_file.close();
+                                booking_file.open(booking_filename, std::ios::app);
+                                if (!booking_file.is_open()) {
+                                    std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] ERRO CRÍTICO: Não foi possível reabrir booking_file" << std::endl;
+                                } else {
+                                    std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] booking_file reaberto com sucesso" << std::endl;
+                                }
+                            } else {
+                                booking_file.flush();
+                            }
+                            
+                            // Log successful writes periodically
+                            static int booking_write_counter = 0;
+                            if (booking_write_counter++ % 100 == 0) {
+                                auto now = std::chrono::system_clock::now();
+                                auto time_t = std::chrono::system_clock::to_time_t(now);
+                                std::cout << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] booking_file: " << booking_write_counter << " escritas realizadas" << std::endl;
+                            }
                             continue;
                         }
                         
