@@ -77,8 +77,12 @@ char current_time_str[20] = {0};
 
 std::string get_current_date() {
     std::time_t t = std::time(nullptr);
+    
+    // Ajustar para horário brasileiro (UTC-3)
+    t -= 3 * 3600; // 3 horas em segundos
+    
     std::tm local_tm;
-    localtime_r(&t, &local_tm);
+    gmtime_r(&t, &local_tm); // Usar gmtime_r pois já ajustamos o offset
     char buffer[11];
     std::strftime(buffer, sizeof(buffer), "%Y%m%d", &local_tm);
     return std::string(buffer);
@@ -86,8 +90,14 @@ std::string get_current_date() {
 
 bool is_time_to_stop() {
     auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    
+    // Ajustar para horário brasileiro (UTC-3)
+    // Subtrair 3 horas do horário UTC para obter horário local brasileiro
+    now -= 3 * 3600; // 3 horas em segundos
+    
     std::tm local_tm;
-    localtime_r(&now, &local_tm);
+    gmtime_r(&now, &local_tm); // Usar gmtime_r pois já ajustamos o offset
+    
     return (local_tm.tm_hour >= 19 or local_tm.tm_hour < 9);
 }
 
@@ -134,8 +144,12 @@ void log_response(const std::string& response, const std::string& symbol) {
 // Add this function to determine the correct WIN contract code
 std::string get_win_contract() {
     std::time_t t = std::time(nullptr);
+    
+    // Ajustar para horário brasileiro (UTC-3)
+    t -= 3 * 3600; // 3 horas em segundos
+    
     std::tm local_tm;
-    localtime_r(&t, &local_tm);
+    gmtime_r(&t, &local_tm); // Usar gmtime_r pois já ajustamos o offset
 
     int year = local_tm.tm_year % 100;  // Get last two digits of year
     int month = local_tm.tm_mon + 1;    // tm_mon is 0-based
@@ -177,8 +191,12 @@ std::string get_win_contract() {
 // Improved function to determine the correct WDO contract code
 std::string get_wdo_contract() {
     std::time_t t = std::time(nullptr);
+    
+    // Ajustar para horário brasileiro (UTC-3)
+    t -= 3 * 3600; // 3 horas em segundos
+    
     std::tm local_tm;
-    localtime_r(&t, &local_tm);
+    gmtime_r(&t, &local_tm); // Usar gmtime_r pois já ajustamos o offset
 
     int year = local_tm.tm_year % 100;  // Get last two digits of year
     int month = local_tm.tm_mon + 1;    // tm_mon is 0-based
@@ -461,8 +479,12 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
     
     // Generate proper timestamp with milliseconds
     time_t now = time(NULL);
+    
+    // Ajustar para horário brasileiro (UTC-3)
+    now -= 3 * 3600; // 3 horas em segundos
+    
     struct tm tm_now_local;
-    localtime_r(&now, &tm_now_local);
+    gmtime_r(&now, &tm_now_local); // Usar gmtime_r pois já ajustamos o offset
     
     // Use current date but with trade time
     struct tm trade_time = tm_now_local;
@@ -507,9 +529,9 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
             state->low_price = trade.price;
             
             // Write the initial brick
-            time_t unix_time = timestamp;
+            time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
             struct tm tm_info;
-            localtime_r(&unix_time, &tm_info);
+            gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
             char time_str[20];
             strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
             
@@ -552,9 +574,9 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     double brick_close = brick_open + brick_size;
                     
                     // Convert Unix timestamp to readable time format
-                    time_t unix_time = timestamp;
+                    time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
                     struct tm tm_info;
-                    localtime_r(&unix_time, &tm_info);
+                    gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
@@ -581,9 +603,9 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     double brick_close = brick_open - brick_size;
                     
                     // Convert Unix timestamp to readable time format
-                    time_t unix_time = timestamp;
+                    time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
                     struct tm tm_info;
-                    localtime_r(&unix_time, &tm_info);
+                    gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
@@ -611,9 +633,9 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     double brick_close = brick_open - brick_size;
                     
                     // Convert Unix timestamp to readable time format
-                    time_t unix_time = timestamp;
+                    time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
                     struct tm tm_info;
-                    localtime_r(&unix_time, &tm_info);
+                    gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
@@ -652,9 +674,9 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     double brick_close = brick_open + brick_size;
                     
                     // Convert Unix timestamp to readable time format
-                    time_t unix_time = timestamp;
+                    time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
                     struct tm tm_info;
-                    localtime_r(&unix_time, &tm_info);
+                    gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
