@@ -809,6 +809,38 @@ void connect_and_listen() {
                     std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] AVISO: raw_file em estado de erro, tentando recuperar..." << std::endl;
                     raw_file.clear();
                 }
+                else {
+                    // Verificar se arquivos estão fechados e decidir ação
+                    if (!raw_file.is_open() || !booking_file.is_open()) {
+                        std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] ERRO CRÍTICO: Arquivos principais fechados!" << std::endl;
+                        std::cerr << "raw_file: " << (raw_file.is_open() ? "ABERTO" : "FECHADO") << ", booking_file: " << (booking_file.is_open() ? "ABERTO" : "FECHADO") << std::endl;
+                        
+                        // Tentar reabrir os arquivos
+                        if (!raw_file.is_open()) {
+                            raw_file.open(raw_filename, std::ios::app);
+                        }
+                        if (!booking_file.is_open()) {
+                            booking_file.open(booking_filename, std::ios::app);
+                        }
+                        
+                        // Se ainda não conseguiu abrir, fechar o programa
+                        if (!raw_file.is_open() || !booking_file.is_open()) {
+                            std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] FALHA CRÍTICA: Não foi possível reabrir arquivos. Encerrando programa para reinício pelo supervisor." << std::endl;
+                            
+                            // Fechar arquivos Renko antes de sair
+                            close_renko_files(configs, MAX_SYMBOLS);
+                            cleanup_renko_states(configs, MAX_SYMBOLS);
+                            
+                            // Fechar arquivos principais se estiverem abertos
+                            if (raw_file.is_open()) raw_file.close();
+                            if (booking_file.is_open()) booking_file.close();
+                            
+                            std::exit(1); // Sair com código de erro para que o supervisor reinicie
+                        }
+                        
+                        std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] Arquivos reabertos com sucesso." << std::endl;
+                    }
+                }
                 if (booking_file.is_open() && booking_file.fail()) {
                     std::cerr << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] AVISO: booking_file em estado de erro, tentando recuperar..." << std::endl;
                     booking_file.clear();
