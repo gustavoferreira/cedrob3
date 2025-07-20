@@ -733,17 +733,19 @@ void connect_and_listen() {
     // Get current date
     std::string date = get_current_date();
     
-    // Initialize Renko processing
-    initialize_renko_processing(configs, MAX_SYMBOLS, date.c_str());
-    
-    // Initialize Renko states
-    initialize_renko_states(configs, MAX_SYMBOLS);
+
     
     if (is_time_to_stop()) {
         std::cerr << "Fora do Horario - Aguardando próximo dia de operação..." << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(60));
         return;
     }
+
+    // Initialize Renko processing
+    initialize_renko_processing(configs, MAX_SYMBOLS, date.c_str());
+    
+    // Initialize Renko states
+    initialize_renko_states(configs, MAX_SYMBOLS);
 
     // Create files for data logging outside the connection loop
     std::string raw_filename = "/home/grao/dados/cedro_files/" + date + "_raw_data.txt";
@@ -1020,7 +1022,7 @@ void connect_and_listen() {
                 }
             }
 
-            // Close Renko files
+           
             close_renko_files(configs, MAX_SYMBOLS);
 
         }
@@ -1029,7 +1031,15 @@ void connect_and_listen() {
             
             // Close Renko files before reconnecting
             close_renko_files(configs, MAX_SYMBOLS);
-            
+
+            if (raw_file.is_open()) {
+                raw_file.close();
+            }
+            if (booking_file.is_open()) {
+                booking_file.close();
+            }
+                        
+
             // Se estiver fora do horário, sai do loop atual
             if (is_time_to_stop()) {
                 std::cerr << "Fora do horário de operação. Aguardando próximo dia..." << std::endl;
@@ -1041,7 +1051,8 @@ void connect_and_listen() {
             continue;
         }
     }
-    
+    // Close Renko files
+    close_renko_files(configs, MAX_SYMBOLS);
     // Close the files when exiting
     if (raw_file.is_open()) {
         raw_file.close();
