@@ -178,8 +178,17 @@ std::string get_win_contract() {
         }
     }
 
-    // Get the correct month code
-    char month_code = month_codes[month - 1];
+    // Get the correct month code based on contract month
+    char month_code;
+    switch(month) {
+        case 2: month_code = 'G'; break;  // February
+        case 4: month_code = 'J'; break;  // April
+        case 6: month_code = 'M'; break;  // June
+        case 8: month_code = 'Q'; break;  // August
+        case 10: month_code = 'V'; break; // October
+        case 12: month_code = 'Z'; break; // December
+        default: month_code = 'Q'; break; // Default to August
+    }
 
     // Format the contract code
     char contract[7];
@@ -202,22 +211,46 @@ std::string get_wdo_contract() {
     int month = local_tm.tm_mon + 1;    // tm_mon is 0-based
     int day = local_tm.tm_mday;
 
-    // WDO contracts use month codes: F, G, H, J, K, M, Q, V, X, Z, F, G
-    char month_codes[] = { 'F', 'G', 'H', 'J', 'K', 'M', 'Q', 'V', 'X', 'Z', 'F', 'G' };
-
-    // For WDO, if we're on or past the 1st day of the month, we need to use the next month's contract
-    // since the contract expires on the first business day of the month
-    if (day >= 1) {
-        // Move to next month's contract
-        month++;
-        if (month > 12) {
-            month = 1;
+    // WDO contracts use month codes: F(Jan), G(Feb), H(Mar), J(Apr), K(May), M(Jun), Q(Aug), V(Oct), X(Nov), Z(Dec)
+    // Note: WDO skips July (N) and September (U)
+    
+    // WDO contracts expire on the first business day of the month
+    // We need to determine which contract is currently active
+    // If we're in the first few days of the month, we might still be using the previous month's contract
+    
+    // For August (month 8), we should use 'Q' (not 'V')
+    // Adjust the month selection logic
+    int contract_month = month;
+    
+    // If we're past the 3rd day of the month, use next available contract month
+    if (day > 3) {
+        // Find next available contract month
+        if (month == 7) contract_month = 8;      // July -> August (Q)
+        else if (month == 8) contract_month = 10; // August -> October (V) 
+        else if (month == 9) contract_month = 10; // September -> October (V)
+        else contract_month = month + 1;
+        
+        if (contract_month > 12) {
+            contract_month = 1;
             year++;
         }
     }
 
-    // Get the correct month code
-    char month_code = month_codes[month - 1];
+    // Get the correct month code based on contract month
+    char month_code;
+    switch(contract_month) {
+        case 1: month_code = 'F'; break;  // January
+        case 2: month_code = 'G'; break;  // February  
+        case 3: month_code = 'H'; break;  // March
+        case 4: month_code = 'J'; break;  // April
+        case 5: month_code = 'K'; break;  // May
+        case 6: month_code = 'M'; break;  // June
+        case 8: month_code = 'Q'; break;  // August
+        case 10: month_code = 'V'; break; // October
+        case 11: month_code = 'X'; break; // November
+        case 12: month_code = 'Z'; break; // December
+        default: month_code = 'Q'; break; // Default to August
+    }
 
     // Format the contract code
     char contract[7];
@@ -275,6 +308,15 @@ TradeData parse_trade_message(const char* line) {
     if (token) {
         // Extract base symbol from full contract code
         char* base_symbol = extract_base_symbol(token);
+        
+        // Debug: log symbol extraction for WDO
+        if (strncmp(token, "WDO", 3) == 0) {
+            static int wdo_symbol_counter = 0;
+            if (wdo_symbol_counter++ % 100 == 0) {
+                std::cerr << "[DEBUG] Símbolo WDO recebido: '" << token << "' -> extraído: '" << base_symbol << "' (contador: " << wdo_symbol_counter << ")" << std::endl;
+            }
+        }
+        
         // Replace strncpy with strncpy_s
         strncpy(trade.asset, base_symbol, sizeof(trade.asset) - 1);
 	trade.asset[sizeof(trade.asset) - 1] = '\0';
@@ -374,8 +416,21 @@ void write_to_renko_file(int config_index, int size_index, const char* day, cons
                          double open, double high, double low, double close) {
     // Use the already opened file from renko_files array
     if (!renko_files[config_index][size_index]) {
-        perror("Arquivo Renko não está aberto");
-        return;
+        // Tentar reabrir o arquivo automaticamente
+        char renko_file[256];
+        snprintf(renko_file, sizeof(renko_file), "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", 
+                day, configs[config_index].asset, configs[config_index].sizes[size_index]);
+        
+        std::cerr << "[AVISO] Arquivo Renko fechado, tentando reabrir: " << renko_file << std::endl;
+        
+        renko_files[config_index][size_index] = fopen(renko_file, "a");
+        if (!renko_files[config_index][size_index]) {
+            std::cerr << "[ERRO] Não foi possível reabrir arquivo Renko: " << renko_file << std::endl;
+            perror("Erro ao reabrir arquivo Renko");
+            return;
+        }
+        
+        std::cerr << "[INFO] Arquivo Renko reaberto com sucesso: " << renko_file << std::endl;
     }
     
     // Write data to the already opened file
@@ -504,7 +559,20 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
         }
     }
     if (config_index == -1) {
+        // Debug: log unknown assets
+        static int unknown_asset_counter = 0;
+        if (unknown_asset_counter++ % 100 == 0) {
+            std::cerr << "[DEBUG] Asset desconhecido: " << trade.asset << " (contador: " << unknown_asset_counter << ")" << std::endl;
+        }
         return; // Skip unknown assets
+    }
+    
+    // Debug: log WDO trades
+    if (strcmp(trade.asset, "WDO") == 0) {
+        static int wdo_trade_counter = 0;
+        if (wdo_trade_counter++ % 50 == 0) {
+            std::cerr << "[DEBUG] Trade WDO processado: preço=" << trade.price << ", ID=" << trade.trade_id << " (contador: " << wdo_trade_counter << ")" << std::endl;
+        }
     }
     
     // Process each Renko size for the current asset
@@ -522,11 +590,24 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
         
         double brick_size = configs[config_index].sizes[i] * configs[config_index].factor;
         
+        // Debug: log brick size calculation for WDO
+        if (strcmp(trade.asset, "WDO") == 0) {
+            static int wdo_brick_counter = 0;
+            if (wdo_brick_counter++ % 200 == 0) {
+                std::cerr << "[DEBUG] WDO[" << configs[config_index].sizes[i] << "] brick_size=" << brick_size << ", current_price=" << state->current_price << ", trade_price=" << trade.price << " (contador: " << wdo_brick_counter << ")" << std::endl;
+            }
+        }
+        
         // Initialize price if this is the first trade
         if (state->current_price == 0.0) {
             state->current_price = trade.price;
             state->high_price = trade.price;
             state->low_price = trade.price;
+            
+            // Debug: log initial brick creation
+            if (strcmp(trade.asset, "WDO") == 0) {
+                std::cerr << "[DEBUG] Criando tijolo inicial WDO[" << configs[config_index].sizes[i] << "]: preço=" << trade.price << std::endl;
+            }
             
             // Write the initial brick
             time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
@@ -568,6 +649,11 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
             if (trade.price > current_price + brick_size) {
                 // Continue uptrend - generate up bricks
                 int num_bricks = (int)((trade.price - current_price) / brick_size);
+                
+                // Debug: log brick generation for WDO
+                if (strcmp(trade.asset, "WDO") == 0) {
+                    std::cerr << "[DEBUG] WDO[" << configs[config_index].sizes[i] << "] gerando " << num_bricks << " tijolos UP: preço atual=" << current_price << ", novo preço=" << trade.price << ", brick_size=" << brick_size << std::endl;
+                }
                 
                 for (int j = 0; j < num_bricks; j++) {
                     double brick_open = current_price;
@@ -639,21 +725,10 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
-                    // Write Renko brick with formatted date and time
-                    char renko_file[256];
-                    snprintf(renko_file, sizeof(renko_file), "/home/dados/renko_files/%s_%s_renko_%d.csv", 
-                              current_date.c_str(), configs[config_index].asset, configs[config_index].sizes[i]);
-                    
-
-                    FILE* temp_file = fopen(renko_file, "a");
-                    if (temp_file) {
-                        fprintf(temp_file, "%s,%lld.%03d,%.2f,%.2f,%.2f,%.2f\n",
-                                time_str, (long long)timestamp, msec,
-                                brick_open, high_price, low_price, brick_close);
-                        fclose(temp_file);
-                    } else {
-                        perror("Erro ao abrir o arquivo");
-                    }
+                    // Write Renko brick using the helper function
+                    write_to_renko_file(config_index, i, current_date.c_str(), configs,
+                                       time_str, timestamp, msec,
+                                       brick_open, high_price, low_price, brick_close);
 
                     
                     strftime(state->current_time_str, sizeof(state->current_time_str), "%Y%m%d %H:%M:%S", &tm_info);
@@ -691,6 +766,14 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     high_price = brick_close;
                     low_price = brick_close;
                 }
+            }
+        }
+        
+        // Debug: log when no bricks are generated for WDO
+        if (strcmp(trade.asset, "WDO") == 0) {
+            static int wdo_no_brick_counter = 0;
+            if (wdo_no_brick_counter++ % 500 == 0) {
+                std::cerr << "[DEBUG] WDO[" << configs[config_index].sizes[i] << "] sem movimento suficiente: current=" << current_price << ", trade=" << trade.price << ", brick_size=" << brick_size << ", trend=" << state->trend_direction << " (contador: " << wdo_no_brick_counter << ")" << std::endl;
             }
         }
         
@@ -815,6 +898,7 @@ void connect_and_listen() {
             };
 
             std::cout << "Using contracts: " << win_contract << " and " << wdo_contract << std::endl;
+            std::cout << "[DEBUG] Contrato WDO configurado: " << wdo_contract << std::endl;
 
             for (size_t i = 0; i < 6; ++i) {
                 boost::asio::write(socket, boost::asio::buffer(commands[i]));
@@ -1077,3 +1161,4 @@ int main() {
     }
     return 0;
 }
+
