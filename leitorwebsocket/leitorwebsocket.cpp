@@ -535,14 +535,11 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
     // Generate proper timestamp with milliseconds
     time_t now = time(NULL);
     
-    // Ajustar para horário brasileiro (UTC-3)
-    now -= 3 * 3600; // 3 horas em segundos
-    
-    struct tm tm_now_local;
-    gmtime_r(&now, &tm_now_local); // Usar gmtime_r pois já ajustamos o offset
+    struct tm tm_now_utc;
+    gmtime_r(&now, &tm_now_utc); // Usar UTC sem ajuste aqui
     
     // Use current date but with trade time
-    struct tm trade_time = tm_now_local;
+    struct tm trade_time = tm_now_utc;
     trade_time.tm_hour = hour;
     trade_time.tm_min = min;
     trade_time.tm_sec = sec;
@@ -612,7 +609,7 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
             // Write the initial brick
             time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
             struct tm tm_info;
-            gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
+            gmtime_r(&unix_time, &tm_info);
             char time_str[20];
             strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
             
@@ -662,7 +659,7 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     // Convert Unix timestamp to readable time format
                     time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
                     struct tm tm_info;
-                    gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
+                    gmtime_r(&unix_time, &tm_info);
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
@@ -691,7 +688,7 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     // Convert Unix timestamp to readable time format
                     time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
                     struct tm tm_info;
-                    gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
+                    gmtime_r(&unix_time, &tm_info);
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
@@ -721,7 +718,7 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     // Convert Unix timestamp to readable time format
                     time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
                     struct tm tm_info;
-                    gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
+                    gmtime_r(&unix_time, &tm_info);
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
@@ -751,7 +748,7 @@ void process_trade_for_renko(const char* line, const RenkoConfig* configs, int n
                     // Convert Unix timestamp to readable time format
                     time_t unix_time = timestamp - 3 * 3600; // Ajustar para horário brasileiro
                     struct tm tm_info;
-                    gmtime_r(&unix_time, &tm_info); // Usar gmtime_r pois já ajustamos o offset
+                    gmtime_r(&unix_time, &tm_info);
                     char time_str[20];
                     strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_info);
                     
