@@ -155,16 +155,35 @@ std::string get_win_contract() {
     int month = local_tm.tm_mon + 1;    // tm_mon is 0-based
     int day = local_tm.tm_mday;
 
-    // WIN contracts use J(Apr), M(Jun), Q(Aug), V(Oct), Z(Dec), G(Feb)
-    char month_codes[] = { 'G', 'G', 'J', 'J', 'M', 'M', 'Q', 'Q', 'V', 'V', 'Z', 'Z' };
-
     // Determine if we need to roll to next contract
-    // For WIN, check if we're within 5 days of expiration (approx. 15th of even months)
+    // For WIN, check if we're past the expiration (Wednesday closest to 15th of even months)
     bool need_to_roll = false;
 
-    if (month % 2 == 0) {  // Even month
-        // If we're past the 10th day of the month, consider rolling to next contract
-        if (day > 10) {
+    if (month % 2 == 0) {  // Even month (contract month)
+        // Calculate the Wednesday closest to the 15th
+        std::tm temp_tm = local_tm;
+        temp_tm.tm_mday = 15;
+        std::mktime(&temp_tm);  // Normalize the date
+        
+        // Find Wednesday closest to 15th
+        int day_of_week = temp_tm.tm_wday;  // 0=Sunday, 3=Wednesday
+        int days_to_wednesday;
+        
+        if (day_of_week <= 3) {
+            days_to_wednesday = 3 - day_of_week;  // Forward to Wednesday
+        } else {
+            days_to_wednesday = 3 - day_of_week + 7;  // Next Wednesday
+        }
+        
+        int expiration_day = 15 + days_to_wednesday;
+        
+        // Adjust if expiration day goes beyond month end
+        if (expiration_day > 31) {
+            expiration_day -= 7;  // Previous Wednesday
+        }
+        
+        // If current day is past expiration day, roll to next contract
+        if (day >= expiration_day) {
             need_to_roll = true;
         }
     }
@@ -181,7 +200,7 @@ std::string get_win_contract() {
     // Get the correct month code based on contract month
     char month_code;
     switch(month) {
-        case 2: month_code = 'G'; break;  // February
+        case 2: month_code = 'F'; break;  // February
         case 4: month_code = 'J'; break;  // April
         case 6: month_code = 'M'; break;  // June
         case 8: month_code = 'Q'; break;  // August
@@ -223,12 +242,9 @@ std::string get_wdo_contract() {
     int contract_month = month;
     
     // If we're past the 3rd day of the month, use next available contract month
-    if (day > 3) {
+    if (day >= 1) {
         // Find next available contract month
-        if (month == 7) contract_month = 8;      // July -> August (Q)
-        else if (month == 8) contract_month = 10; // August -> October (V) 
-        else if (month == 9) contract_month = 10; // September -> October (V)
-        else contract_month = month + 1;
+        contract_month = month + 1;
         
         if (contract_month > 12) {
             contract_month = 1;
@@ -245,7 +261,9 @@ std::string get_wdo_contract() {
         case 4: month_code = 'J'; break;  // April
         case 5: month_code = 'K'; break;  // May
         case 6: month_code = 'M'; break;  // June
+        case 7: month_code = 'N'; break;  // August
         case 8: month_code = 'Q'; break;  // August
+        case 9: month_code = 'U'; break;  // August
         case 10: month_code = 'V'; break; // October
         case 11: month_code = 'X'; break; // November
         case 12: month_code = 'Z'; break; // December
