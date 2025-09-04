@@ -155,11 +155,16 @@ std::string get_win_contract() {
     int month = local_tm.tm_mon + 1;    // tm_mon is 0-based
     int day = local_tm.tm_mday;
 
-    // Determine if we need to roll to next contract
-    // For WIN, check if we're past the expiration (Wednesday closest to 15th of even months)
-    bool need_to_roll = false;
-
-    if (month % 2 == 0) {  // Even month (contract month)
+    // WIN contracts only exist in even months (Feb, Apr, Jun, Aug, Oct, Dec)
+    // If we're in an odd month, move to next even month
+    if (month % 2 == 1) {
+        month += 1;
+        if (month > 12) {
+            month = 2;  // February of next year
+            year++;
+        }
+    } else {
+        // We're in an even month, check if we need to roll to next contract
         // Calculate the Wednesday closest to the 15th
         std::tm temp_tm = local_tm;
         temp_tm.tm_mday = 15;
@@ -184,23 +189,18 @@ std::string get_win_contract() {
         
         // If current day is past expiration day, roll to next contract
         if (day >= expiration_day) {
-            need_to_roll = true;
-        }
-    }
-
-    // If we need to roll, move to next contract
-    if (need_to_roll) {
-        month += 2;
-        if (month > 12) {
-            month -= 12;
-            year++;
+            month += 2;
+            if (month > 12) {
+                month -= 12;
+                year++;
+            }
         }
     }
 
     // Get the correct month code based on contract month
     char month_code;
     switch(month) {
-        case 2: month_code = 'F'; break;  // February
+        case 2: month_code = 'G'; break;  // February
         case 4: month_code = 'J'; break;  // April
         case 6: month_code = 'M'; break;  // June
         case 8: month_code = 'Q'; break;  // August
