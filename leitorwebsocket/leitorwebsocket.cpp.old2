@@ -1,0 +1,427 @@
+//g++-11 -std=c++17 leitorwebsocket.cpp -lboost_system -lpthread
+#include <iostream>
+#include <boost/asio.hpp>
+#include <fstream>
+#include <ctime>
+#include <experimental/filesystem>
+#include <filesystem>
+#include <chrono>
+#include <thread>
+#include <boost/algorithm/string.hpp>
+#include <cmath>
+#include <iomanip>
+
+//#using boost::asio::ip::tcp;
+namespace fs = std::filesystem;
+
+#if BOOST_VERSION >= 106600
+    namespace asio = boost::asio;
+    using io_context_type = asio::io_context;
+#else
+    namespace asio = boost::asio;
+    using io_context_type = asio::io_service;
+#endif
+
+// Constants from gera_renko.c
+#define MAX_LINE_LENGTH 1024
+#define MAX_RENKO_SIZES 10
+#define MAX_SYMBOLS 3
+#define MARKET_OPEN_HOUR 9
+#define MARKET_OPEN_MIN 0
+#define MARKET_CLOSE_HOUR 24
+#define SLEEP_INTERVAL_MS 100
+
+#ifndef _WIN32
+#define _strdup strdup
+#endif
+
+char current_time_str[20] = {0};
+
+std::string get_current_date() {
+    std::time_t t = std::time(nullptr);
+    
+    // Ajustar para horário brasileiro (UTC-3)
+    t -= 3 * 3600; // 3 horas em segundos
+    
+    std::tm local_tm;
+    gmtime_r(&t, &local_tm); // Usar gmtime_r pois já ajustamos o offset
+    char buffer[11];
+    std::strftime(buffer, sizeof(buffer), "%Y%m%d", &local_tm);
+    return std::string(buffer);
+}
+
+bool is_time_to_stop() {
+    time_t now = time(nullptr);
+
+    std::tm local_tm;
+    localtime_r(&now, &local_tm);
+
+    // HORÁRIO DO BRASIL:
+    int h = local_tm.tm_hour;
+
+    return (h >= 19 || h < 9);
+}
+
+
+void log_response(const std::string& response, const std::string& symbol) {
+    std::string date = get_current_date();
+    std::string type = (response.rfind("V:", 0) == 0) ? "quote" : "booking";
+    std::string filename = "/home/grao/dados/cedro_files/" + date + "_" + symbol + "_" + type + ".txt";
+
+    try {
+        // Create directories with error checking
+        std::error_code ec;
+        fs::create_directories("/home/grao/dados/cedro_files/", ec);
+        if (ec) {
+            std::cerr << "Erro ao criar diretório: " << ec.message() << std::endl;
+            return;
+        }
+        
+        std::ofstream log_file(filename, std::ios::app);
+        if (!log_file.is_open()) {
+            std::cerr << "Erro ao abrir arquivo: " << filename << std::endl;
+            return;
+        }
+        
+        log_file << response << std::endl;
+        
+        // Check if write was successful
+        if (log_file.fail()) {
+            std::cerr << "Erro ao escrever no arquivo: " << filename << std::endl;
+            return;
+        }
+        
+        log_file.close();
+        
+        // Verify file was closed properly
+        if (log_file.fail()) {
+            std::cerr << "Erro ao fechar arquivo: " << filename << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Exceção na função log_response: " << e.what() << std::endl;
+    }
+}
+
+
+// Add this function to determine the correct WIN contract code
+std::string get_win_contract() {
+    std::time_t t = std::time(nullptr);
+    
+    // Ajustar para horário brasileiro (UTC-3)
+    t -= 3 * 3600; // 3 horas em segundos
+    
+    std::tm local_tm;
+    gmtime_r(&t, &local_tm); // Usar gmtime_r pois já ajustamos o offset
+
+    int year = local_tm.tm_year % 100;  // Get last two digits of year
+    int month = local_tm.tm_mon + 1;    // tm_mon is 0-based
+    int day = local_tm.tm_mday;
+
+    // WIN contracts only exist in even months (Feb, Apr, Jun, Aug, Oct, Dec)
+    // If we're in an odd month, move to next even month
+    if (month % 2 == 1) {
+        month += 1;
+        if (month > 12) {
+            month = 2;  // February of next year
+            year++;
+        }
+    } else {
+        // We're in an even month, check if we need to roll to next contract
+        // Calculate the Wednesday closest to the 15th
+        std::tm temp_tm = local_tm;
+        temp_tm.tm_mday = 15;
+        std::mktime(&temp_tm);  // Normalize the date
+        
+        // Find Wednesday closest to 15th
+        int day_of_week = temp_tm.tm_wday;  // 0=Sunday, 3=Wednesday
+        int days_to_wednesday;
+        
+        if (day_of_week <= 3) {
+            days_to_wednesday = 3 - day_of_week;  // Forward to Wednesday
+        } else {
+            days_to_wednesday = 3 - day_of_week + 7;  // Next Wednesday
+        }
+        
+        int expiration_day = 15 + days_to_wednesday;
+        
+        // Adjust if expiration day goes beyond month end
+        if (expiration_day > 31) {
+            expiration_day -= 7;  // Previous Wednesday
+        }
+        
+        // If current day is past expiration day, roll to next contract
+        if (day >= expiration_day) {
+            month += 2;
+            if (month > 12) {
+                month -= 12;
+                year++;
+            }
+        }
+    }
+
+    // Get the correct month code based on contract month
+    char month_code;
+    switch(month) {
+        case 2: month_code = 'G'; break;  // February
+        case 4: month_code = 'J'; break;  // April
+        case 6: month_code = 'M'; break;  // June
+        case 8: month_code = 'Q'; break;  // August
+        case 10: month_code = 'V'; break; // October
+        case 12: month_code = 'Z'; break; // December
+        default: month_code = 'Q'; break; // Default to August
+    }
+
+    // Format the contract code
+    char contract[7];
+    snprintf(contract, sizeof(contract),  "WIN%c%d", month_code, year);
+
+    return std::string(contract);
+}
+
+// Improved function to determine the correct WDO contract code
+std::string get_wdo_contract() {
+    std::time_t t = std::time(nullptr);
+    
+    // Ajustar para horário brasileiro (UTC-3)
+    t -= 3 * 3600; // 3 horas em segundos
+    
+    std::tm local_tm;
+    gmtime_r(&t, &local_tm); // Usar gmtime_r pois já ajustamos o offset
+
+    int year = local_tm.tm_year % 100;  // Get last two digits of year
+    int month = local_tm.tm_mon + 1;    // tm_mon is 0-based
+    int day = local_tm.tm_mday;
+
+    // WDO contracts use month codes: F(Jan), G(Feb), H(Mar), J(Apr), K(May), M(Jun), Q(Aug), V(Oct), X(Nov), Z(Dec)
+    // Note: WDO skips July (N) and September (U)
+    
+    // WDO contracts expire on the first business day of the month
+    // We need to determine which contract is currently active
+    // If we're in the first few days of the month, we might still be using the previous month's contract
+    
+    // For August (month 8), we should use 'Q' (not 'V')
+    // Adjust the month selection logic
+    int contract_month = month;
+    
+    // If we're past the 3rd day of the month, use next available contract month
+    if (day >= 1) {
+        // Find next available contract month
+        contract_month = month + 1;
+        
+        if (contract_month > 12) {
+            contract_month = 1;
+            year++;
+        }
+    }
+
+    // Get the correct month code based on contract month
+    char month_code;
+    switch(contract_month) {
+        case 1: month_code = 'F'; break;  // January
+        case 2: month_code = 'G'; break;  // February  
+        case 3: month_code = 'H'; break;  // March
+        case 4: month_code = 'J'; break;  // April
+        case 5: month_code = 'K'; break;  // May
+        case 6: month_code = 'M'; break;  // June
+        case 7: month_code = 'N'; break;  // August
+        case 8: month_code = 'Q'; break;  // August
+        case 9: month_code = 'U'; break;  // August
+        case 10: month_code = 'V'; break; // October
+        case 11: month_code = 'X'; break; // November
+        case 12: month_code = 'Z'; break; // December
+        default: month_code = 'Q'; break; // Default to August
+    }
+
+    // Format the contract code
+    char contract[7];
+    snprintf(contract,sizeof(contract),  "WDO%c%d", month_code, year);
+
+    return std::string(contract);
+}
+
+
+using boost::asio::ip::tcp;
+void connect_and_listen() {
+    std::string date = get_current_date();
+    std::string raw_filename = "/home/grao/dados/cedro_files/" + date + "_raw_data.txt";
+    fs::create_directories("/home/grao/dados/cedro_files");
+    std::ofstream raw_file(raw_filename, std::ios::app);
+
+    if (!raw_file.is_open()) {
+        std::error_code ec;
+        fs::create_directories("/home/grao/dados/cedro_files", ec);
+        raw_file.open(raw_filename, std::ios::app);
+        if (!raw_file.is_open()) {
+            std::cerr << "Erro crítico: arquivo raw não pôde ser aberto: " << raw_filename << std::endl;
+        }
+    }
+
+    if (is_time_to_stop()) {
+        std::cerr << "Fora do Horario - Aguardando próximo dia de operação..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(60));
+        return;
+    }
+
+    while (!is_time_to_stop()) {
+        try {
+            io_context_type io_context;
+            tcp::resolver resolver(io_context);
+            tcp::resolver::query query("datafeed1.cedrotech.com", "81");
+            auto endpoints = resolver.resolve(query);
+            tcp::socket socket(io_context);
+            boost::asio::connect(socket, endpoints);
+
+            socket.set_option(boost::asio::socket_base::keep_alive(true));
+            socket.set_option(boost::asio::socket_base::send_buffer_size(1024));
+            socket.set_option(boost::asio::socket_base::receive_buffer_size(1024));
+
+            std::cout << "Conectado ao servidor!" << std::endl;
+            const char start[] = { '\r', '\n' };
+            boost::asio::write(socket, boost::asio::buffer(start, sizeof(start)));
+
+            // Handshake de login
+            boost::asio::streambuf response;
+            boost::system::error_code error;
+            size_t length = boost::asio::read_until(socket, response, "Username:");
+            if (error) throw boost::system::system_error(error);
+            std::string initial_response = std::string(boost::asio::buffers_begin(response.data()), boost::asio::buffers_begin(response.data()) + length);
+            response.consume(length);
+            std::cout << "Resposta inicial: " << initial_response << std::endl;
+
+            const char username[] = { 'g', 'u', 's', 't', 'a', 'v', 'o', 'f', 'm', '\r', '\n' };
+            boost::asio::write(socket, boost::asio::buffer(username, sizeof(username)));
+            size_t length2 = boost::asio::read_until(socket, response, "Password:");
+            std::string resposta = std::string(boost::asio::buffers_begin(response.data()), boost::asio::buffers_begin(response.data()) + length2);
+            response.consume(length2);
+            std::cout << "Resposta: " << resposta << std::endl;
+
+            const char password[] = { 'M', 'k', 'd', 't', '@', '3', '5', '1', '2', '5', '6', '\r', '\n' };
+            boost::asio::write(socket, boost::asio::buffer(password, sizeof(password)));
+
+            size_t length3 = boost::asio::read_until(socket, response, "You are connected");
+            std::string login_response = std::string(boost::asio::buffers_begin(response.data()), boost::asio::buffers_begin(response.data()) + length3);
+            response.consume(length3);
+            std::cout << "Resposta após senha: " << login_response << std::endl;
+
+            // Assina contratos atuais
+            std::string win_contract = get_win_contract();
+            std::string wdo_contract = get_wdo_contract();
+            //std::string commands[] = {
+            //    "BQT " + win_contract + "\n",
+             //   "GQT " + win_contract + " S 10\n",
+           //     "BQT " + wdo_contract + "\n",
+           //     "GQT " + wdo_contract + " S \n",
+           //     "GQT DI1F27 S\n",
+           //     "BQT DI1F27\n"
+           // };
+            std::string commands[] = {
+                "GQT " + win_contract + " S\r\n",
+                "GQT " + wdo_contract + " S\r\n",
+                "GQT DI1F27 S\r\n"
+            };
+	    std::cout << "Resposta : " <<  wdo_contract;
+	    
+            for (size_t i = 0; i < 6; ++i) {
+                boost::asio::write(socket, boost::asio::buffer(commands[i]));
+            }
+
+            // Loop principal: lê e grava dados brutos
+            while (!is_time_to_stop()) {
+                // Rotaciona arquivo quando muda a data
+                std::string current_date = get_current_date();
+                if (current_date != date) {
+                    date = current_date;
+                    if (raw_file.is_open()) raw_file.close();
+                    raw_filename = "/home/grao/dados/cedro_files/" + date + "_raw_data.txt";
+                    std::error_code ec;
+                    fs::create_directories("/home/grao/dados/cedro_files", ec);
+                    raw_file.open(raw_filename, std::ios::app);
+                    if (!raw_file.is_open()) {
+                        std::cerr << "Erro ao reabrir arquivo raw: " << raw_filename << std::endl;
+                    }
+                }
+
+                boost::asio::streambuf reply_buf;
+                boost::system::error_code read_error;
+                size_t reply_length = socket.read_some(reply_buf.prepare(4096), read_error);
+                if (read_error) {
+                    if (read_error == boost::asio::error::eof) {
+                        std::cerr << "Connection closed by server" << std::endl;
+                        break;
+                    }
+                    throw boost::system::system_error(read_error);
+                }
+
+                reply_buf.commit(reply_length);
+                std::string response_data(
+                    boost::asio::buffers_begin(reply_buf.data()),
+                    boost::asio::buffers_begin(reply_buf.data()) + reply_length
+                );
+                reply_buf.consume(reply_length);
+
+                if (!response_data.empty()) {
+                    if (!raw_file.is_open()) {
+                        raw_file.open(raw_filename, std::ios::app);
+                        if (!raw_file.is_open()) {
+                            std::cerr << "Erro crítico: arquivo raw está fechado; descartando buffer." << std::endl;
+                        } else {
+                            raw_file << response_data;
+                            raw_file.flush();
+                        }
+                    } else {
+                        raw_file << response_data;
+                        raw_file.flush();
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Erro de conexão: " << e.what() << std::endl;
+
+            // Não feche o arquivo se estiver aberto; mantenha pronto para reuso
+            if (!raw_file.is_open()) {
+                raw_file.open(raw_filename, std::ios::app);
+                if (!raw_file.is_open()) {
+                    std::cerr << "Erro ao manter arquivo raw aberto após exceção: " << raw_filename << std::endl;
+                }
+            }
+
+            // Sai se estiver fora do horário
+            if (is_time_to_stop()) {
+                std::cerr << "Fora do horário de operação. Aguardando próximo dia..." << std::endl;
+                return;
+            }
+
+            std::cerr << "Tentando reconectar em 5 segundos..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+
+            // Garantir que arquivo permaneça aberto para continuar gravando
+            if (!raw_file.is_open()) {
+                raw_file.open(raw_filename, std::ios::app);
+                if (!raw_file.is_open()) {
+                    std::cerr << "Erro ao reabrir arquivo raw para reconexão: " << raw_filename << std::endl;
+                }
+            }
+            continue;
+        }
+    }
+
+    // Fecha o arquivo ao sair
+    if (raw_file.is_open()) {
+        raw_file.close();
+    }
+    std::cout << "Sessão encerrada. Reiniciando em 5 segundos..." << std::endl;
+}
+int main() {
+    while (true) {
+        try {
+            connect_and_listen();
+            std::cout << "Sessão encerrada. Reiniciando em 5 segundos..." << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Erro na sessão principal: " << e.what() << std::endl;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+    return 0;
+}
+
+

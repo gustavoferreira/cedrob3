@@ -23,6 +23,7 @@ using namespace std;
 #endif
 
 #include <ctype.h>
+#include <dirent.h>
 
 #define MAX_LINE_LENGTH 1024
 #define MAX_RENKO_SIZES 10
@@ -165,7 +166,7 @@ int is_market_hours() {
 
 // Function to process the raw data file
 // Inside the process_raw_data function, add tracking for the last processed trade ID
-void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_configs, const char* day) {
+void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_configs, const char* day, int is_historical) {
     FILE* input_file = fopen(raw_file, "r");
     if (!input_file) {
         printf("Error opening file: %s\n", raw_file);
@@ -192,7 +193,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
     for (int s = 0; s < num_configs; s++) {
         for (int i = 0; i < configs[s].num_sizes; i++) {
             char renko_file[256];
-            sprintf(renko_file, "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", day, configs[s].asset, configs[s].sizes[i]);
+	    sprintf(renko_file, "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", day, configs[s].asset, configs[s].sizes[i]);
             renko_files[s][i] = fopen(renko_file, "w");
             if (!renko_files[s][i]) {
                 printf("Error creating Renko file: %s\n", renko_file);
@@ -225,8 +226,8 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
     }
 
     while (1) {
-        // Verificar horário de mercado
-        if (!is_market_hours()) {
+        // Verificar horário de mercado apenas no modo tempo real
+        if (!is_historical && !is_market_hours()) {
             printf("Outside market hours (09:00-19:00). Exiting...\n");
             break;
         }
@@ -271,8 +272,9 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
 
                 // Converte para time_t
                 time_t timestamp = mktime(&tm_day);
-                timestamp += 3 * 3600;
-                
+                timestamp += 1;//3 * 3600;
+                // Converte o timestamp ajustado de volta para struct tm
+                struct tm *tm_adj = localtime(&timestamp);                
                 
                 // Debug output to verify timestamp
                 //char debug_time[30];
@@ -304,12 +306,12 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                     if (current_prices[config_index][i] == 0.0) {
                         current_prices[config_index][i] = trade.price;
                         char time_str[20];
-                        strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                        strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                         fprintf(renko_files[config_index][i], "%s,%ld.%03d,%.2f,%.2f,%.2f,%.2f\n",
                             time_str, timestamp, msec,
                             trade.price, trade.price, trade.price, trade.price);
                         fflush(renko_files[config_index][i]);
-                        strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                        strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                     }
                     
                     // Track the current trend direction (1 for up, -1 for down)
@@ -332,7 +334,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                     // Calculate how many bricks to generate based on direction
                     if (trend_direction[config_index][i] > 0) {
                         // Current trend is up
-                        if (trade.price > current_price + brick_size) {
+                        if (trade.price >= current_price + brick_size) {
                             // Continue uptrend - generate up bricks
                             int num_bricks = (int)((trade.price - current_price) / brick_size);
                             
@@ -341,18 +343,18 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                                 double brick_close = brick_open + brick_size;
                                 
                                 char time_str[20];
-                                strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                                strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                                 
                                 // Write Renko brick with formatted date and time
                                 fprintf(renko_files[config_index][i], "%s,%ld.%03d,%.2f,%.2f,%.2f,%.2f\n",
                                     time_str,
                                     timestamp, msec,
                                     brick_open,
-                                    high_price,  // High is close for up brick
-                                    low_price,   // Low is open for up brick
+                                    brick_close,  // High is close for up brick
+                                    brick_open,   // Low is open for up brick
                                     brick_close);
                                 fflush(renko_files[config_index][i]);
-                                strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                                strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                                 current_price = brick_close;
                                 high_prices[config_index][i] = brick_close;
                                 low_prices[config_index][i] = brick_close;
@@ -370,7 +372,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                             double brick_close = brick_open - brick_size;
                             
                             char time_str[20];
-                            strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                            strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                             
                             // Write reversal brick
 
@@ -385,7 +387,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                             current_price = brick_close;
                             high_prices[config_index][i] = brick_close;
                             low_prices[config_index][i] = brick_close;
-                            strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                            strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                             
                             // Additional bricks after reversal
                             for (int j = 1; j < num_bricks; j++) {
@@ -399,7 +401,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                                     low_price,  // Low is close for down brick
                                     brick_close);
                                 fflush(renko_files[config_index][i]);
-                                strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                                strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                                 current_price = brick_close;
                                 high_prices[config_index][i] = brick_close;
                                 low_prices[config_index][i] = brick_close;
@@ -417,7 +419,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                                 double brick_close = brick_open - brick_size;
                                 
                                 char time_str[20];
-                                strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                                strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                                 // Write Renko brick with formatted date and time
                                 fprintf(renko_files[config_index][i], "%s,%ld.%03d,%.2f,%.2f,%.2f,%.2f\n",
                                     time_str,
@@ -427,7 +429,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                                     low_price,  // Low is close for down brick
                                     brick_close);
                                 fflush(renko_files[config_index][i]);
-                                strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                                strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                                 current_price = brick_close;
                                 high_prices[config_index][i] = brick_close;
                                 low_prices[config_index][i] = brick_close;
@@ -445,7 +447,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                             double brick_close = brick_open + brick_size;
                             
                             char time_str[20];
-                            strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                            strftime(time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                             
                             // Write reversal brick
                             fprintf(renko_files[config_index][i], "%s,%ld.%03d,%.2f,%.2f,%.2f,%.2f\n",
@@ -456,7 +458,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                                 low_price,   // Low is open for up brick
                                 brick_close);
                             fflush(renko_files[config_index][i]);
-                            strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                            strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                             current_price = brick_close;
                             high_prices[config_index][i] = brick_close;
                             low_prices[config_index][i] = brick_close;
@@ -473,7 +475,7 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
                                     low_price,   // Low is open for up brick
                                     brick_close);
                                 fflush(renko_files[config_index][i]);
-                                strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", &tm_day);
+                                strftime(current_time_str, sizeof(time_str), "%Y%m%d %H:%M:%S", tm_adj);
                                 current_price = brick_close;
                                 high_prices[config_index][i] = brick_close;
                                 low_prices[config_index][i] = brick_close;
@@ -489,6 +491,13 @@ void process_raw_data(const char* raw_file, const RenkoConfig* configs, int num_
         }
         else {
             // Chegou ao fim do arquivo
+            if (is_historical) {
+                // No modo histórico, simplesmente terminar quando chegar ao final
+                printf("Fim do arquivo histórico alcançado.\n");
+                break;
+            }
+            
+            // Modo tempo real: tentar reabrir arquivo e aguardar novos dados
             eof_count++;
 
             if (eof_count >= 10) { // Após algumas tentativas
@@ -582,7 +591,72 @@ void set_brazil_timezone() {
 }
 
 // Modify the main function to set the timezone at the beginning
-int main() {
+// Função para processar arquivos históricos
+void process_historical_files(const RenkoConfig* configs, int num_configs) {
+    printf("Processando arquivos históricos...\n");
+    
+    DIR *dir;
+    struct dirent *entry;
+    const char *directory_path = "/home/grao/dados/cedro_files";
+    
+    dir = opendir(directory_path);
+    if (dir == NULL) {
+        printf("Erro: Não foi possível abrir o diretório %s\n", directory_path);
+        return;
+    }
+    
+    int files_processed = 0;
+    
+    // Ler todos os arquivos do diretório
+    while ((entry = readdir(dir)) != NULL) {
+        // Verificar se é um arquivo regular e se tem extensão .txt
+        if (entry->d_type == DT_REG && strstr(entry->d_name, ".txt") != NULL) {
+            char full_path[512];
+            sprintf(full_path, "%s/%s", directory_path, entry->d_name);
+            
+            // Extrair a data do nome do arquivo (assumindo formato YYYYMMDD_raw_data.txt)
+            char day[9] = {0};
+            if (strlen(entry->d_name) >= 8) {
+                strncpy(day, entry->d_name, 8);
+                day[8] = '\0';
+            }
+            
+            // Verificar se os arquivos Renko já existem para esta data
+            int already_processed = 1;
+            for (int s = 0; s < num_configs && already_processed; s++) {
+                for (int i = 0; i < configs[s].num_sizes && already_processed; i++) {
+                    char renko_file_check[256];
+                    sprintf(renko_file_check, "/home/grao/dados/renko_files/%s_%s_renko_%d.csv", 
+                           day, configs[s].asset, configs[s].sizes[i]);
+                    FILE* check_file = fopen(renko_file_check, "r");
+                    if (!check_file) {
+                        already_processed = 0; // Pelo menos um arquivo não existe
+                    } else {
+                        fclose(check_file);
+                    }
+                }
+            }
+            
+            if (already_processed) {
+                printf("Arquivos Renko já existem para %s, pulando...\n", day);
+            } else {
+                printf("Processando arquivo histórico: %s\n", full_path);
+                process_raw_data(full_path, configs, num_configs, day, 1); // 1 = modo histórico
+                files_processed++;
+            }
+        }
+    }
+    
+    closedir(dir);
+    
+    if (files_processed == 0) {
+        printf("Nenhum arquivo .txt encontrado no diretório %s\n", directory_path);
+    } else {
+        printf("Processamento histórico concluído. %d arquivos processados.\n", files_processed);
+    }
+}
+
+int main(int argc, char* argv[]) {
     // Set Brazil timezone
     set_brazil_timezone();
     
@@ -592,13 +666,38 @@ int main() {
         {.asset = "WDO", .factor = 0.5, .num_sizes = 3, .sizes = {5, 7, 10} },
         {.asset = "WIN", .factor = 5.0, .num_sizes = 3, .sizes = {10, 20, 30} }
     };
+    
+    // Verificar argumentos de linha de comando
+    int realtime_mode = 1;
+    int historical_mode = 0;
+    
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "realtime=True") == 0 || strcmp(argv[i], "realtime=true") == 0) {
+            realtime_mode = 1;
+        }
+        else if (strcmp(argv[i], "historico=True") == 0 || strcmp(argv[i], "historico=true") == 0) {
+            historical_mode = 1;
+        }
+    }
+    
+    // Se nenhum modo foi especificado, usar modo realtime por padrão
+    if (!realtime_mode && !historical_mode) {
+        printf("Nenhum modo especificado. Usando modo realtime por padrão.\n");
+        printf("Use: %s realtime=True ou %s historico=True\n", argv[0], argv[0]);
+        realtime_mode = 1;
+    }
+    
+    if (historical_mode) {
+        process_historical_files(configs, MAX_SYMBOLS);
+        return 0;
+    }
 
     // Get current date
     time_t now = time(NULL);
     struct tm* tm_now = localtime(&now);
     char day[9];
     strftime(day, sizeof(day), "%Y%m%d", tm_now);
-    //const char* day= "20250402";
+    //const char* day= "20251118";
 
     // Process raw data file
     char raw_file[256];
@@ -630,7 +729,7 @@ int main() {
 
     // Start processing data
     while (is_market_hours()) {
-        process_raw_data(raw_file, configs, MAX_SYMBOLS, day);
+        process_raw_data(raw_file, configs, MAX_SYMBOLS, day, 0); // 0 = modo tempo real
 
         // Aguardar um pouco antes de tentar novamente
 #ifdef _WIN32
@@ -643,3 +742,4 @@ int main() {
     printf("Market closed. Processing completed.\n");
     return 0;
 }
+

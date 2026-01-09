@@ -1,5 +1,4 @@
-// Para GCC < 8 (ex: 7.5): g++ -std=c++17 leitorwebsocket.cpp -lboost_system -lpthread -lstdc++fs
-// Para GCC >= 8: g++ -std=c++17 leitorwebsocket.cpp -lboost_system -lpthread
+//g++ -std=c++17 leitorwebsocket.cpp -lboost_system -lpthread -lstdc++fs
 #include <iostream>
 #include <boost/asio.hpp>
 #include <fstream>
@@ -14,8 +13,6 @@
 #include <boost/algorithm/string.hpp>
 #include <cmath>
 #include <iomanip>
-#include <map>
-#include <memory>
 
 //#using boost::asio::ip::tcp;
 #if defined(__GNUC__) && (__GNUC__ < 8) && !defined(_WIN32)
@@ -653,90 +650,7 @@ void connect_and_listen() {
     }
     std::cout << "Sessão encerrada. Reiniciando em 5 segundos..." << std::endl;
 }
-void process_raw_file(const std::string& input_filepath) {
-    std::ifstream raw_file(input_filepath);
-    if (!raw_file.is_open()) {
-        std::cerr << "Erro: Nao foi possivel abrir o arquivo raw: " << input_filepath << std::endl;
-        return;
-    }
-
-    std::cout << "Processando arquivo raw: " << input_filepath << "..." << std::endl;
-
-    // Garantir que o diretório de saída existe
-    std::error_code ec;
-    fs::create_directories(get_output_dir(), ec);
-    if (ec) {
-        std::cerr << "Aviso: Nao foi possivel criar o diretorio de saida: " << ec.message() << std::endl;
-    }
-
-    std::string line;
-    // Map to keep files open: filename -> ofstream
-    std::map<std::string, std::shared_ptr<std::ofstream>> open_files;
-    long long line_count = 0;
-
-    while (std::getline(raw_file, line)) {
-        if (line.empty()) continue;
-        if (line.back() == '\r') line.pop_back();
-
-        // Format: ts,len,delta,content
-        // Example: 20260108_094657,1428,0,B:WING26...
-        
-        size_t p1 = line.find(',');
-        if (p1 == std::string::npos) continue;
-        
-        std::string ts = line.substr(0, p1);
-        if (ts.length() < 8) continue;
-        std::string date = ts.substr(0, 8); // YYYYMMDD
-
-        size_t p2 = line.find(',', p1 + 1);
-        if (p2 == std::string::npos) continue;
-
-        size_t p3 = line.find(',', p2 + 1);
-        if (p3 == std::string::npos) continue;
-
-        std::string content = line.substr(p3 + 1);
-        std::string suffix = "";
-
-        if (content.rfind("B:", 0) == 0) suffix = "_B.txt";
-        else if (content.rfind("V:", 0) == 0) suffix = "_V.txt";
-        else if (content.rfind("T:", 0) == 0) suffix = "_T.txt";
-        else if (content.rfind("Z:", 0) == 0) suffix = "_Z.txt";
-
-        if (!suffix.empty()) {
-            std::string out_filename = get_output_dir() + date + suffix;
-            
-            if (open_files.find(out_filename) == open_files.end()) {
-                 // Open with trunc for the first time in this session to regenerate
-                 std::shared_ptr<std::ofstream> ofs = std::make_shared<std::ofstream>(out_filename, std::ios::trunc);
-                 if (ofs->is_open()) {
-                     open_files[out_filename] = ofs;
-                     std::cout << "Regerando arquivo: " << out_filename << std::endl;
-                 } else {
-                     std::cerr << "Erro ao criar arquivo: " << out_filename << std::endl;
-                     continue;
-                 }
-            }
-
-            auto& ofs = open_files[out_filename];
-            *ofs << line << "\n";
-        }
-        
-        line_count++;
-        if (line_count % 10000 == 0) {
-            std::cout << "Processadas " << line_count << " linhas..." << "\r";
-            std::cout.flush();
-        }
-    }
-    
-    std::cout << "\nConcluido. Total de linhas processadas: " << line_count << std::endl;
-}
-
-int main(int argc, char* argv[]) {
-    if (argc == 3 && std::string(argv[1]) == "--raw") {
-        process_raw_file(argv[2]);
-        return 0;
-    }
-
+int main() {
     while (true) {
         try {
             connect_and_listen();

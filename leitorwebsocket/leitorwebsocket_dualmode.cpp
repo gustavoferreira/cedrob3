@@ -1,28 +1,23 @@
-// Para GCC < 8 (ex: 7.5): g++ -std=c++17 leitorwebsocket.cpp -lboost_system -lpthread -lstdc++fs
-// Para GCC >= 8: g++ -std=c++17 leitorwebsocket.cpp -lboost_system -lpthread
+//g++-11 -std=c++17 leitorwebsocket.cpp -lboost_system -lpthread
 #include <iostream>
 #include <boost/asio.hpp>
 #include <fstream>
 #include <ctime>
-#if defined(__GNUC__) && (__GNUC__ < 8) && !defined(_WIN32)
-    #include <experimental/filesystem>
-#else
-    #include <filesystem>
-#endif
+#include <filesystem>
 #include <chrono>
 #include <thread>
 #include <boost/algorithm/string.hpp>
 #include <cmath>
 #include <iomanip>
-#include <map>
-#include <memory>
+#include <atomic>
+#include <csignal>
+#include <regex>
 
 //#using boost::asio::ip::tcp;
-#if defined(__GNUC__) && (__GNUC__ < 8) && !defined(_WIN32)
-    namespace fs = std::experimental::filesystem;
-#else
-    namespace fs = std::filesystem;
-#endif
+namespace fs = std::filesystem;
+
+static std::atomic_bool g_stop{false};
+static void handle_signal(int) { g_stop.store(true); }
 
 #if BOOST_VERSION >= 106600
     namespace asio = boost::asio;
@@ -287,6 +282,215 @@ std::string get_wdo_contract() {
 }
 
 
+
+// -----------------------------
+// Dual-mode: live socket OR rebuild from raw_data.txt
+// -----------------------------
+struct ProgramArgs {
+    std::string raw_file;   // se informado, roda em modo offline (rebuild)
+    std::string out_dir;    // diretório de saída (default = get_output_dir())
+    std::string date;       // YYYYMMDD (opcional; tenta inferir do nome/primeira linha)
+    bool overwrite = false; // truncar arquivos de saída
+    bool help = false;
+};
+
+static std::string ensure_trailing_slash(std::string p) {
+    if (p.empty()) return p;
+    if (p.back() != '/' && p.back() != '\\') p.push_back('/');
+    return p;
+}
+
+static bool all_digits(const std::string& s) {
+    for (char c : s) if (c < '0' || c > '9') return false;
+    return !s.empty();
+}
+
+static bool is_yyyymmdd(const std::string& s) {
+    return s.size() == 8 && all_digits(s);
+}
+
+static bool starts_with_data_prefix(const std::string& s) {
+    return (s.rfind("B:", 0) == 0) || (s.rfind("V:", 0) == 0) || (s.rfind("T:", 0) == 0) || (s.rfind("Z:", 0) == 0);
+}
+
+static std::string infer_date_from_filename(const std::string& path) {
+    std::string base = fs::path(path).filename().string();
+    // procura qualquer sequência de 8 dígitos no nome
+    for (size_t i = 0; i + 8 <= base.size(); ++i) {
+        std::string sub = base.substr(i, 8);
+        if (is_yyyymmdd(sub)) return sub;
+    }
+    return "";
+}
+
+static std::string infer_date_from_first_line(const std::string& raw_file) {
+    std::ifstream in(raw_file);
+    if (!in.is_open()) return "";
+    std::string line;
+    if (!std::getline(in, line)) return "";
+    // formato típico: YYYYMMDD_HHMMSS,reply_len,delta_ms,payload...
+    size_t p1 = line.find(',');
+    if (p1 == std::string::npos) return "";
+    std::string ts = line.substr(0, p1);
+    if (ts.size() >= 8 && all_digits(ts.substr(0, 8))) return ts.substr(0, 8);
+    return "";
+}
+
+static ProgramArgs parse_args(int argc, char** argv) {
+    ProgramArgs a;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            a.help = true;
+            return a;
+        } else if (arg == "--raw-file" || arg == "--raw") {
+            if (i + 1 < argc) a.raw_file = argv[++i];
+        } else if (arg == "--out-dir") {
+            if (i + 1 < argc) a.out_dir = argv[++i];
+        } else if (arg == "--date") {
+            if (i + 1 < argc) a.date = argv[++i];
+        } else if (arg == "--overwrite") {
+            a.overwrite = true;
+        }
+    }
+    return a;
+}
+
+static void print_help(const char* prog) {
+    std::cerr
+        << "Uso:\n"
+        << "  " << prog << "                 # modo live (socket)\n"
+        << "  " << prog << " --raw-file <raw_data.txt> [--out-dir <dir>] [--date YYYYMMDD] [--overwrite]\n\n"
+        << "Exemplos:\n"
+        << "  " << prog << " --raw-file /home/grao/dados/cedro_files/20260107_raw_data.txt --overwrite\n"
+        << "  " << prog << " --raw-file /home/grao/dados/cedro_files/20260107_raw_data.txt --out-dir /home/grao/dados/cedro_files/\n";
+}
+
+static void rebuild_from_raw(const ProgramArgs& args) {
+    if (args.raw_file.empty()) {
+        std::cerr << "[ERRO] --raw-file não informado.\n";
+        return;
+    }
+    std::string out_dir = args.out_dir.empty() ? get_output_dir() : args.out_dir;
+    out_dir = ensure_trailing_slash(out_dir);
+
+    std::string date = args.date;
+    if (!is_yyyymmdd(date)) date = infer_date_from_filename(args.raw_file);
+    if (!is_yyyymmdd(date)) date = infer_date_from_first_line(args.raw_file);
+    if (!is_yyyymmdd(date)) date = get_current_date();
+
+    std::error_code ec;
+    fs::create_directories(out_dir, ec);
+    if (ec) {
+        std::cerr << "[ERRO] Não foi possível criar diretório de saída: " << out_dir << " (" << ec.message() << ")\n";
+        return;
+    }
+
+    std::ios_base::openmode mode = std::ios::out | std::ios::app;
+    if (args.overwrite) mode = std::ios::out | std::ios::trunc;
+
+    std::string b_filename = out_dir + date + "_B.txt";
+    std::string v_filename = out_dir + date + "_V.txt";
+    std::string t_filename = out_dir + date + "_T.txt";
+    std::string z_filename = out_dir + date + "_Z.txt";
+    std::string o_filename = out_dir + date + "_orphans.txt";
+
+    std::ofstream b_out(b_filename, mode);
+    std::ofstream v_out(v_filename, mode);
+    std::ofstream t_out(t_filename, mode);
+    std::ofstream z_out(z_filename, mode);
+    std::ofstream o_out(o_filename, mode);
+
+    if (!b_out.is_open() || !v_out.is_open() || !t_out.is_open() || !z_out.is_open()) {
+        std::cerr << "[ERRO] Falha ao abrir arquivos de saída em: " << out_dir << "\n";
+        return;
+    }
+
+    std::ifstream in(args.raw_file);
+    if (!in.is_open()) {
+        std::cerr << "[ERRO] Falha ao abrir raw_file: " << args.raw_file << "\n";
+        return;
+    }
+
+    std::string pending_ts, pending_len, pending_delta;
+    std::string pending_payload;
+    char pending_type = 0; // 'B','V','T','Z'
+    long long n_out_b=0, n_out_v=0, n_out_t=0, n_out_z=0, n_orphans=0, n_lines=0;
+
+    auto flush_pending = [&]() {
+        if (pending_payload.empty() || pending_type == 0) return;
+        std::ostream* out = nullptr;
+        switch (pending_type) {
+            case 'B': out = &b_out; break;
+            case 'V': out = &v_out; break;
+            case 'T': out = &t_out; break;
+            case 'Z': out = &z_out; break;
+            default: out = nullptr; break;
+        }
+        if (out) {
+            (*out) << pending_ts << "," << pending_len << "," << pending_delta << "," << pending_payload << "\n";
+            if (pending_type == 'B') n_out_b++;
+            else if (pending_type == 'V') n_out_v++;
+            else if (pending_type == 'T') n_out_t++;
+            else if (pending_type == 'Z') n_out_z++;
+        }
+        pending_ts.clear(); pending_len.clear(); pending_delta.clear();
+        pending_payload.clear(); pending_type = 0;
+    };
+
+    std::string line;
+    while (std::getline(in, line)) {
+        n_lines++;
+        if (line.empty()) continue;
+
+        // Parse 4 colunas: ts, reply_len, delta_ms, payload...
+        size_t p1 = line.find(',');
+        if (p1 == std::string::npos) { n_orphans++; if (o_out.is_open()) o_out << line << "\n"; continue; }
+        size_t p2 = line.find(',', p1 + 1);
+        if (p2 == std::string::npos) { n_orphans++; if (o_out.is_open()) o_out << line << "\n"; continue; }
+        size_t p3 = line.find(',', p2 + 1);
+        if (p3 == std::string::npos) { n_orphans++; if (o_out.is_open()) o_out << line << "\n"; continue; }
+
+        std::string ts = line.substr(0, p1);
+        std::string reply_len = line.substr(p1 + 1, p2 - (p1 + 1));
+        std::string delta_ms = line.substr(p2 + 1, p3 - (p2 + 1));
+        std::string payload = line.substr(p3 + 1);
+
+        if (payload.empty()) continue;
+
+        // Regras:
+        // 1) Se começar com B:/V:/T:/Z: => novo registro (flush do anterior)
+        // 2) Se NÃO começar, mas já existe pending => é continuação (TCP quebrou no meio), concatenar.
+        // 3) Se NÃO começar e não existe pending => orphan/ruído (handshake etc), descartar (opcionalmente logar).
+        if (starts_with_data_prefix(payload)) {
+            flush_pending();
+            pending_ts = ts;
+            pending_len = reply_len;
+            pending_delta = delta_ms;
+            pending_payload = payload;
+            pending_type = payload[0];
+        } else if (!pending_payload.empty()) {
+            pending_payload += payload;
+        } else {
+            n_orphans++;
+            if (o_out.is_open()) o_out << line << "\n";
+        }
+    }
+    flush_pending();
+
+    b_out.flush(); v_out.flush(); t_out.flush(); z_out.flush();
+    if (o_out.is_open()) o_out.flush();
+
+    std::cerr << "[OK] Rebuild finalizado.\n"
+              << "  raw_file: " << args.raw_file << "\n"
+              << "  date:     " << date << "\n"
+              << "  out_dir:  " << out_dir << "\n"
+              << "  lines:    " << n_lines << "\n"
+              << "  B: " << n_out_b << "  V: " << n_out_v << "  T: " << n_out_t << "  Z: " << n_out_z << "\n"
+              << "  orphans:  " << n_orphans << " (salvos em " << o_filename << ")\n";
+}
+
+
 using boost::asio::ip::tcp;
 void connect_and_listen() {
     std::string date = get_current_date();
@@ -312,13 +516,15 @@ void connect_and_listen() {
         }
     }
 
+    if (g_stop.load()) { return; }
+
     if (is_time_to_stop()) {
         std::cerr << "Fora do Horario - Aguardando próximo dia de operação..." << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(60));
         return;
     }
 
-    while (!is_time_to_stop()) {
+    while (!is_time_to_stop() && !g_stop.load()) {
             // Buffer de escrita em lote
             std::string batch_buffer;
             int batch_count = 0;
@@ -329,7 +535,9 @@ void connect_and_listen() {
             std::string z_batch;
             auto last_flush = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point last_record_tp;
-        bool has_last_record = false;	
+        bool has_last_record = false;
+        std::string rx_pending; // acumula bytes entre read_some para não quebrar linhas
+	
         try {
             io_context_type io_context;
             tcp::resolver resolver(io_context);
@@ -405,6 +613,7 @@ void connect_and_listen() {
                 //send_line("BQT " + win_contract);
 		//
 		send_line("BQT " + win_contract );
+  	        send_line("BQT " + win_contract ); 
                 //send_line("BQT " + wdo_contract);
                 send_line("GQT " + wdo_contract + " S");
                 send_line("GQT " + win_contract + " S");
@@ -423,11 +632,8 @@ void connect_and_listen() {
 
             // Buffer de escrita em lote já definido fora do try
 
-            std::string rx_buffer;
-            rx_buffer.reserve(131072);
-
             // Loop principal: lê e grava dados brutos
-            while (!is_time_to_stop()) {
+            while (!is_time_to_stop() && !g_stop.load()) {
                 // Rotaciona arquivo quando muda a data
                 std::string current_date = get_current_date();
                 if (current_date != date) {
@@ -486,109 +692,146 @@ void connect_and_listen() {
                 }
 
                 reply_buf.commit(reply_length);
-                rx_buffer.append(
+                std::string response_data(
                     boost::asio::buffers_begin(reply_buf.data()),
                     boost::asio::buffers_begin(reply_buf.data()) + reply_length
                 );
                 reply_buf.consume(reply_length);
 
-                size_t start = 0;
-                while (true) {
-                    size_t nl = rx_buffer.find('\n', start);
-                    if (nl == std::string::npos) break;
+                if (!response_data.empty()) {
+                    // NOTE: TCP pode quebrar uma linha no meio. Acumulamos bytes em rx_pending e só processamos linhas completas (terminadas em \n).
+                    rx_pending.append(response_data);
 
-                    std::string line = rx_buffer.substr(start, nl - start);
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
-                    start = nl + 1;
-                    if (line.empty()) continue;
+                    size_t start_pos = 0;
+                    while (true) {
+                        size_t nl = rx_pending.find('\n', start_pos);
+                        if (nl == std::string::npos) break;
 
-                    const std::string ts = get_current_datetime_str();
-                    auto now_line = std::chrono::steady_clock::now();
-                    long long delta_ms = has_last_record ? std::chrono::duration_cast<std::chrono::milliseconds>(now_line - last_record_tp).count() : 0;
-                    last_record_tp = now_line;
-                    has_last_record = true;
-                    batch_buffer += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
-                    batch_count++;
+                        std::string line = rx_pending.substr(start_pos, nl - start_pos);
+                        start_pos = nl + 1;
+                        if (!line.empty() && line.back() == '\r') line.pop_back();
 
-                    if (line.rfind("B:", 0) == 0) {
-                        b_batch += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
-                    } else if (line.rfind("V:", 0) == 0) {
-                        v_batch += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
-                    } else if (line.rfind("T:", 0) == 0) {
-                        t_batch += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
-                    } else if (line.rfind("Z:", 0) == 0) {
-                        z_batch += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
-                    }
+                        if (line.empty()) continue;
+                        //const std::string ts = get_current_datetime_str();
+                        //batch_buffer += ts + " " + line + "\n";
+                        //batch_count++;
+                        const std::string ts = get_current_datetime_str();
+                        auto now_line = std::chrono::steady_clock::now();
+                        long long delta_ms = has_last_record ? std::chrono::duration_cast<std::chrono::milliseconds>(now_line - last_record_tp).count() : 0;
+                        last_record_tp = now_line;
+                        has_last_record = true;
+                        batch_buffer += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
+                        batch_count++;            
 
-                    if (batch_count >= 10) {
-                        if (!raw_file.is_open()) {
-                            raw_file.open(raw_filename, std::ios::app);
+                        // Acumula também em buffers por tipo (mesmo formato)
+                        if (line.rfind("B:", 0) == 0) {
+                            b_batch += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
+                        } else if (line.rfind("V:", 0) == 0) {
+                            v_batch += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
+                        } else if (line.rfind("T:", 0) == 0) {
+                            t_batch += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
+                        } else if (line.rfind("Z:", 0) == 0) {
+                            z_batch += ts + "," + std::to_string(reply_length) + "," + std::to_string(delta_ms) + "," + line + "\n";
+                        }
+
+                        if (batch_count >= 10) {
                             if (!raw_file.is_open()) {
-                                std::cerr << "Erro crítico: arquivo raw está fechado; descartando buffer." << std::endl;
+                                raw_file.open(raw_filename, std::ios::app);
+                                if (!raw_file.is_open()) {
+                                    std::cerr << "Erro crítico: arquivo raw está fechado; descartando buffer." << std::endl;
+                                }
+                            }
+                            if (raw_file.is_open()) {
+                                raw_file << batch_buffer;
+                                raw_file.flush();
+                                batch_buffer.clear();
+                                batch_count = 0;
+                                last_flush = std::chrono::steady_clock::now();
+                            }
+                            // Flush dos buffers por tipo
+                            if (!b_batch.empty()) {
+                                if (!b_file.is_open()) b_file.open(b_filename, std::ios::app);
+                                if (b_file.is_open()) { b_file << b_batch; b_file.flush(); b_batch.clear(); }
+                            }
+                            if (!v_batch.empty()) {
+                                if (!v_file.is_open()) v_file.open(v_filename, std::ios::app);
+                                if (v_file.is_open()) { v_file << v_batch; v_file.flush(); v_batch.clear(); }
+                            }
+                            if (!t_batch.empty()) {
+                                if (!t_file.is_open()) t_file.open(t_filename, std::ios::app);
+                                if (t_file.is_open()) { t_file << t_batch; t_file.flush(); t_batch.clear(); }
+                            }
+                            if (!z_batch.empty()) {
+                                if (!z_file.is_open()) z_file.open(z_filename, std::ios::app);
+                                if (z_file.is_open()) { z_file << z_batch; z_file.flush(); z_batch.clear(); }
                             }
                         }
-                        if (raw_file.is_open()) {
-                            raw_file << batch_buffer;
-                            raw_file.flush();
-                            batch_buffer.clear();
-                            batch_count = 0;
-                            last_flush = std::chrono::steady_clock::now();
-                        }
-                        if (!b_batch.empty()) {
-                            if (!b_file.is_open()) b_file.open(b_filename, std::ios::app);
-                            if (b_file.is_open()) { b_file << b_batch; b_file.flush(); b_batch.clear(); }
-                        }
-                        if (!v_batch.empty()) {
-                            if (!v_file.is_open()) v_file.open(v_filename, std::ios::app);
-                            if (v_file.is_open()) { v_file << v_batch; v_file.flush(); v_batch.clear(); }
-                        }
-                        if (!t_batch.empty()) {
-                            if (!t_file.is_open()) t_file.open(t_filename, std::ios::app);
-                            if (t_file.is_open()) { t_file << t_batch; t_file.flush(); t_batch.clear(); }
-                        }
-                        if (!z_batch.empty()) {
-                            if (!z_file.is_open()) z_file.open(z_filename, std::ios::app);
-                            if (z_file.is_open()) { z_file << z_batch; z_file.flush(); z_batch.clear(); }
-                        }
+                    
                     }
-                }
 
-                if (start > 0) rx_buffer.erase(0, start);
-                if (rx_buffer.size() > 1048576) rx_buffer.erase(0, rx_buffer.size() - 65536);
-
-                auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::seconds>(now - last_flush).count() >= 5 && !batch_buffer.empty()) {
-                    if (!raw_file.is_open()) {
-                        raw_file.open(raw_filename, std::ios::app);
-                        if (!raw_file.is_open()) {
-                            std::cerr << "Erro crítico: arquivo raw está fechado; descartando buffer." << std::endl;
-                        }
-                    }
-                    if (raw_file.is_open()) {
-                        raw_file << batch_buffer;
-                        raw_file.flush();
-                        batch_buffer.clear();
-                        batch_count = 0;
-                        last_flush = now;
-                    }
-                    if (!b_batch.empty()) {
-                        if (!b_file.is_open()) b_file.open(b_filename, std::ios::app);
-                        if (b_file.is_open()) { b_file << b_batch; b_file.flush(); b_batch.clear(); }
-                    }
-                    if (!v_batch.empty()) {
-                        if (!v_file.is_open()) v_file.open(v_filename, std::ios::app);
-                        if (v_file.is_open()) { v_file << v_batch; v_file.flush(); v_batch.clear(); }
-                    }
-                    if (!t_batch.empty()) {
-                        if (!t_file.is_open()) t_file.open(t_filename, std::ios::app);
-                        if (t_file.is_open()) { t_file << t_batch; t_file.flush(); t_batch.clear(); }
-                    }
-                    if (!z_batch.empty()) {
-                        if (!z_file.is_open()) z_file.open(z_filename, std::ios::app);
-                        if (z_file.is_open()) { z_file << z_batch; z_file.flush(); z_batch.clear(); }
-                    }
+                    if (start_pos > 0) rx_pending.erase(0, start_pos);
                 }
             }
+
+            // Saímos do loop de leitura (EOF ou horário). Garantir flush dos buffers pendentes.
+            if (!batch_buffer.empty()) {
+                if (!raw_file.is_open()) raw_file.open(raw_filename, std::ios::app);
+                if (raw_file.is_open()) {
+                    raw_file << batch_buffer;
+                    raw_file.flush();
+                }
+                batch_buffer.clear();
+                batch_count = 0;
+            }
+            if (!b_batch.empty()) {
+                if (!b_file.is_open()) b_file.open(b_filename, std::ios::app);
+                if (b_file.is_open()) { b_file << b_batch; b_file.flush(); }
+                b_batch.clear();
+            }
+            if (!v_batch.empty()) {
+                if (!v_file.is_open()) v_file.open(v_filename, std::ios::app);
+                if (v_file.is_open()) { v_file << v_batch; v_file.flush(); }
+                v_batch.clear();
+            }
+            if (!t_batch.empty()) {
+                if (!t_file.is_open()) t_file.open(t_filename, std::ios::app);
+                if (t_file.is_open()) { t_file << t_batch; t_file.flush(); }
+                t_batch.clear();
+            }
+            if (!z_batch.empty()) {
+                if (!z_file.is_open()) z_file.open(z_filename, std::ios::app);
+                if (z_file.is_open()) { z_file << z_batch; z_file.flush(); }
+                z_batch.clear();
+            }
+            rx_pending.clear();
+
+
+
+// Loop de leitura terminou (fim de sessão ou stop). Faz flush do que restou (<10 linhas / <5s).
+if (!batch_buffer.empty() && raw_file.is_open()) {
+    raw_file << batch_buffer;
+    raw_file.flush();
+    batch_buffer.clear();
+    batch_count = 0;
+}
+if (!b_batch.empty()) {
+    if (!b_file.is_open()) b_file.open(b_filename, std::ios::app);
+    if (b_file.is_open()) { b_file << b_batch; b_file.flush(); b_batch.clear(); }
+}
+if (!v_batch.empty()) {
+    if (!v_file.is_open()) v_file.open(v_filename, std::ios::app);
+    if (v_file.is_open()) { v_file << v_batch; v_file.flush(); v_batch.clear(); }
+}
+if (!t_batch.empty()) {
+    if (!t_file.is_open()) t_file.open(t_filename, std::ios::app);
+    if (t_file.is_open()) { t_file << t_batch; t_file.flush(); t_batch.clear(); }
+}
+if (!z_batch.empty()) {
+    if (!z_file.is_open()) z_file.open(z_filename, std::ios::app);
+    if (z_file.is_open()) { z_file << z_batch; z_file.flush(); z_batch.clear(); }
+}
+rx_pending.clear();
+
         } catch (const std::exception& e) {
             std::cerr << "Erro de conexão: " << e.what() << std::endl;
 
@@ -630,6 +873,7 @@ void connect_and_listen() {
                 return;
             }
 
+            if (g_stop.load()) { return; }
             std::cerr << "Tentando reconectar em 5 segundos..." << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(5));
 
@@ -653,91 +897,21 @@ void connect_and_listen() {
     }
     std::cout << "Sessão encerrada. Reiniciando em 5 segundos..." << std::endl;
 }
-void process_raw_file(const std::string& input_filepath) {
-    std::ifstream raw_file(input_filepath);
-    if (!raw_file.is_open()) {
-        std::cerr << "Erro: Nao foi possivel abrir o arquivo raw: " << input_filepath << std::endl;
-        return;
-    }
+int main(int argc, char** argv) {
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
 
-    std::cout << "Processando arquivo raw: " << input_filepath << "..." << std::endl;
-
-    // Garantir que o diretório de saída existe
-    std::error_code ec;
-    fs::create_directories(get_output_dir(), ec);
-    if (ec) {
-        std::cerr << "Aviso: Nao foi possivel criar o diretorio de saida: " << ec.message() << std::endl;
-    }
-
-    std::string line;
-    // Map to keep files open: filename -> ofstream
-    std::map<std::string, std::shared_ptr<std::ofstream>> open_files;
-    long long line_count = 0;
-
-    while (std::getline(raw_file, line)) {
-        if (line.empty()) continue;
-        if (line.back() == '\r') line.pop_back();
-
-        // Format: ts,len,delta,content
-        // Example: 20260108_094657,1428,0,B:WING26...
-        
-        size_t p1 = line.find(',');
-        if (p1 == std::string::npos) continue;
-        
-        std::string ts = line.substr(0, p1);
-        if (ts.length() < 8) continue;
-        std::string date = ts.substr(0, 8); // YYYYMMDD
-
-        size_t p2 = line.find(',', p1 + 1);
-        if (p2 == std::string::npos) continue;
-
-        size_t p3 = line.find(',', p2 + 1);
-        if (p3 == std::string::npos) continue;
-
-        std::string content = line.substr(p3 + 1);
-        std::string suffix = "";
-
-        if (content.rfind("B:", 0) == 0) suffix = "_B.txt";
-        else if (content.rfind("V:", 0) == 0) suffix = "_V.txt";
-        else if (content.rfind("T:", 0) == 0) suffix = "_T.txt";
-        else if (content.rfind("Z:", 0) == 0) suffix = "_Z.txt";
-
-        if (!suffix.empty()) {
-            std::string out_filename = get_output_dir() + date + suffix;
-            
-            if (open_files.find(out_filename) == open_files.end()) {
-                 // Open with trunc for the first time in this session to regenerate
-                 std::shared_ptr<std::ofstream> ofs = std::make_shared<std::ofstream>(out_filename, std::ios::trunc);
-                 if (ofs->is_open()) {
-                     open_files[out_filename] = ofs;
-                     std::cout << "Regerando arquivo: " << out_filename << std::endl;
-                 } else {
-                     std::cerr << "Erro ao criar arquivo: " << out_filename << std::endl;
-                     continue;
-                 }
-            }
-
-            auto& ofs = open_files[out_filename];
-            *ofs << line << "\n";
-        }
-        
-        line_count++;
-        if (line_count % 10000 == 0) {
-            std::cout << "Processadas " << line_count << " linhas..." << "\r";
-            std::cout.flush();
-        }
-    }
-    
-    std::cout << "\nConcluido. Total de linhas processadas: " << line_count << std::endl;
-}
-
-int main(int argc, char* argv[]) {
-    if (argc == 3 && std::string(argv[1]) == "--raw") {
-        process_raw_file(argv[2]);
+    ProgramArgs pargs = parse_args(argc, argv);
+    if (pargs.help) {
+        print_help(argv[0]);
         return 0;
     }
-
-    while (true) {
+    if (!pargs.raw_file.empty()) {
+        // Modo offline: reconstrói B/V/T/Z a partir do raw_data.txt
+        rebuild_from_raw(pargs);
+        return 0;
+    }
+    while (!g_stop.load()) {
         try {
             connect_and_listen();
             std::cout << "Sessão encerrada. Reiniciando em 5 segundos..." << std::endl;
@@ -748,4 +922,3 @@ int main(int argc, char* argv[]) {
     }
     return 0;
 }
-
